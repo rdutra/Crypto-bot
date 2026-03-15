@@ -1,20 +1,27 @@
 import os
-from typing import Any, Dict, Tuple
+from datetime import datetime
+from typing import Any, Dict, Optional, Set, Tuple
 
 import numpy as np
 import requests
 import talib.abstract as ta
+from freqtrade.persistence import Trade
 from freqtrade.strategy import IStrategy, merge_informative_pair
 from pandas import DataFrame
 
+VALID_STRATEGY_MODES = {"conservative", "aggressive"}
+STRATEGY_MODE = os.getenv("STRATEGY_MODE", "conservative").strip().lower()
+if STRATEGY_MODE not in VALID_STRATEGY_MODES:
+    STRATEGY_MODE = "conservative"
+
 
 class LlmTrendPullbackStrategy(IStrategy):
-    timeframe = "1h"
-    informative_timeframe = "4h"
+    timeframe = "15m" if STRATEGY_MODE == "aggressive" else "1h"
+    informative_timeframe = "1h" if STRATEGY_MODE == "aggressive" else "4h"
     can_short = False
 
-    minimal_roi = {"0": 0.05, "360": 0.02, "1080": 0.0}
-    stoploss = -0.06
+    minimal_roi = {"0": 0.03, "120": 0.015, "480": 0.0} if STRATEGY_MODE == "aggressive" else {"0": 0.05, "360": 0.02, "1080": 0.0}
+    stoploss = -0.08 if STRATEGY_MODE == "aggressive" else -0.06
     trailing_stop = False
     trailing_stop_positive = 0.02
     trailing_stop_positive_offset = 0.04
@@ -26,8 +33,30 @@ class LlmTrendPullbackStrategy(IStrategy):
 
     _llm_cache: Dict[str, Tuple[bool, str]] = {}
 
+    def _is_aggressive(self) -> bool:
+        return STRATEGY_MODE == "aggressive"
+
     @property
     def protections(self):
+        if self._is_aggressive():
+            return [
+                {"method": "CooldownPeriod", "stop_duration_candles": 2},
+                {
+                    "method": "StoplossGuard",
+                    "lookback_period_candles": 32,
+                    "trade_limit": 4,
+                    "stop_duration_candles": 8,
+                    "only_per_pair": False,
+                },
+                {
+                    "method": "MaxDrawdown",
+                    "lookback_period_candles": 64,
+                    "trade_limit": 30,
+                    "stop_duration_candles": 12,
+                    "max_allowed_drawdown": 0.08,
+                },
+            ]
+
         return [
             {"method": "CooldownPeriod", "stop_duration_candles": 4},
             {
@@ -50,6 +79,139 @@ class LlmTrendPullbackStrategy(IStrategy):
         pairs = self.dp.current_whitelist() if self.dp else []
         return [(pair, self.informative_timeframe) for pair in pairs]
 
+    def _parse_pairs(self, value: str) -> Set[str]:
+        return {part.strip().upper() for part in value.replace(",", " ").split() if part.strip()}
+
+    def _pair_symbol(self, pair: str) -> str:
+        # Handles symbols like "BTC/USDT:USDT" by keeping "BTC/USDT".
+        return pair.split(":")[0].upper()
+
+    def _core_pairs(self) -> Set[str]:
+        return self._parse_pairs(os.getenv("CORE_PAIRS", "BTC/USDT ETH/USDT BNB/USDT"))
+
+    def _risk_pairs(self) -> Set[str]:
+        return self._parse_pairs(os.getenv("RISK_PAIRS", "SOL/USDT XRP/USDT AVAX/USDT"))
+
+    def _is_risk_pair(self, pair: str) -> bool:
+        return self._pair_symbol(pair) in self._risk_pairs()
+
+    def _is_core_pair(self, pair: str) -> bool:
+        symbol = self._pair_symbol(pair)
+        core = self._core_pairs()
+        if symbol in core:
+            return True
+        return symbol not in self._risk_pairs()
+
+    def _float_env(self, key: str, default: float, min_value: float, max_value: float) -> float:
+        try:
+            value = float(os.getenv(key, str(default)))
+        except ValueError:
+            value = default
+        return max(min_value, min(max_value, value))
+
+    def _int_env(self, key: str, default: int, min_value: int, max_value: int) -> int:
+        try:
+            value = int(os.getenv(key, str(default)))
+        except ValueError:
+            value = default
+        return max(min_value, min(max_value, value))
+
+    def _risk_stake_multiplier(self) -> float:
+        return self._float_env("RISK_STAKE_MULTIPLIER", 0.5, 0.1, 1.0)
+
+    def _risk_max_open_trades(self) -> int:
+        return self._int_env("RISK_MAX_OPEN_TRADES", 1, 1, 5)
+
+    def _entry_thresholds(self, pair: str) -> Dict[str, float]:
+        if self._is_risk_pair(pair):
+            if self._is_aggressive():
+                return {
+                    "rsi_min": 38.0,
+                    "rsi_max": 66.0,
+                    "adx_min": self._float_env("RISK_ADX_MIN", 14.0, 10.0, 35.0),
+                    "atr_min": 0.4,
+                    "atr_max": self._float_env("RISK_ATR_MAX", 6.0, 1.2, 9.0),
+                    "ema_spread_min": self._float_env("RISK_EMA_SPREAD_MIN", -0.05, -0.4, 1.5),
+                    "ema20_overext": 1.05,
+                    "pullback_floor": 0.94,
+                    "vol_mult_min": 0.35,
+                    "vol_z_min": -1.8,
+                    "rebound_over_prev": 0.995,
+                }
+            return {
+                "rsi_min": 46.0,
+                "rsi_max": 56.0,
+                "adx_min": self._float_env("RISK_ADX_MIN", 26.0, 18.0, 45.0),
+                "atr_min": 1.1,
+                "atr_max": self._float_env("RISK_ATR_MAX", 3.4, 1.5, 6.0),
+                "ema_spread_min": self._float_env("RISK_EMA_SPREAD_MIN", 0.25, 0.05, 1.0),
+                "ema20_overext": 1.01,
+                "pullback_floor": 0.98,
+                "vol_mult_min": 1.0,
+                "vol_z_min": -0.2,
+                "rebound_over_prev": 1.002,
+            }
+
+        if self._is_aggressive():
+            return {
+                "rsi_min": 38.0,
+                "rsi_max": 66.0,
+                "adx_min": 12.0,
+                "atr_min": 0.4,
+                "atr_max": 6.0,
+                "ema_spread_min": -0.05,
+                "ema20_overext": 1.05,
+                "pullback_floor": 0.95,
+                "vol_mult_min": 0.35,
+                "vol_z_min": -1.8,
+                "rebound_over_prev": 0.995,
+            }
+
+        return {
+            "rsi_min": 44.0,
+            "rsi_max": 58.0,
+            "adx_min": 22.0,
+            "atr_min": 0.9,
+            "atr_max": 3.8,
+            "ema_spread_min": 0.15,
+            "ema20_overext": 1.015,
+            "pullback_floor": 0.98,
+            "vol_mult_min": 0.8,
+            "vol_z_min": -0.6,
+            "rebound_over_prev": 1.0,
+        }
+
+    def _exit_thresholds(self, pair: str) -> Dict[str, float]:
+        if self._is_risk_pair(pair):
+            if self._is_aggressive():
+                return {
+                    "rsi_take": 70.0,
+                    "ema20_break": 0.992,
+                    "adx_weak": 18.0,
+                    "ema50_break": 0.978,
+                }
+            return {
+                "rsi_take": 74.0,
+                "ema20_break": 0.99,
+                "adx_weak": 22.0,
+                "ema50_break": 0.985,
+            }
+
+        if self._is_aggressive():
+            return {
+                "rsi_take": 72.0,
+                "ema20_break": 0.99,
+                "adx_weak": 16.0,
+                "ema50_break": 0.975,
+            }
+
+        return {
+            "rsi_take": 76.0,
+            "ema20_break": 0.985,
+            "adx_weak": 20.0,
+            "ema50_break": 0.98,
+        }
+
     def _llm_enabled(self) -> bool:
         flag = os.getenv("ENABLE_LLM_FILTER", "false").strip().lower()
         if flag not in {"1", "true", "yes", "on"}:
@@ -70,6 +232,15 @@ class LlmTrendPullbackStrategy(IStrategy):
             return "higher_highs"
         return "mixed"
 
+    def _trend_col(self) -> str:
+        return f"trend_{self.informative_timeframe}"
+
+    def _ema50_info_col(self) -> str:
+        return f"ema50_{self.informative_timeframe}"
+
+    def _ema200_info_col(self) -> str:
+        return f"ema200_{self.informative_timeframe}"
+
     def _llm_allows_trade(self, row: Any, pair: str) -> Tuple[bool, str]:
         candle_time = row["date"].isoformat() if hasattr(row["date"], "isoformat") else str(row["date"])
         cache_key = f"{pair}:{candle_time}"
@@ -88,7 +259,7 @@ class LlmTrendPullbackStrategy(IStrategy):
             "adx_14": float(row["adx"]),
             "atr_pct": float(row["atr_pct"]),
             "volume_zscore": float(row["volume_z"]),
-            "trend_4h": "bullish" if bool(row.get("trend_4h", 0)) else "bearish",
+            "trend_4h": "bullish" if bool(row.get(self._trend_col(), 0)) else "bearish",
             "market_structure": self._market_structure(row),
         }
         bot_api = os.getenv("BOT_API_URL", "http://bot-api:8000")
@@ -112,6 +283,10 @@ class LlmTrendPullbackStrategy(IStrategy):
         return allowed, reason
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        trend_col = self._trend_col()
+        ema50_info_col = self._ema50_info_col()
+        ema200_info_col = self._ema200_info_col()
+
         dataframe["ema20"] = ta.EMA(dataframe, timeperiod=20)
         dataframe["ema50"] = ta.EMA(dataframe, timeperiod=50)
         dataframe["ema200"] = ta.EMA(dataframe, timeperiod=200)
@@ -140,21 +315,26 @@ class LlmTrendPullbackStrategy(IStrategy):
                     self.informative_timeframe,
                     ffill=True,
                 )
-                dataframe["trend_4h"] = dataframe["trend_4h"].fillna(0).astype("int8")
+                dataframe[trend_col] = dataframe[trend_col].fillna(0).astype("int8")
             else:
-                dataframe["trend_4h"] = 0
-                dataframe["ema50_4h"] = np.nan
-                dataframe["ema200_4h"] = np.nan
+                dataframe[trend_col] = 0
+                dataframe[ema50_info_col] = np.nan
+                dataframe[ema200_info_col] = np.nan
         else:
-            dataframe["trend_4h"] = 0
-            dataframe["ema50_4h"] = np.nan
-            dataframe["ema200_4h"] = np.nan
+            dataframe[trend_col] = 0
+            dataframe[ema50_info_col] = np.nan
+            dataframe[ema200_info_col] = np.nan
 
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         dataframe["enter_long"] = 0
         dataframe["enter_tag"] = None
+        thresholds = self._entry_thresholds(metadata["pair"])
+        informative_trend_ratio = 1.0 if self._is_aggressive() else 1.01
+        trend_col = self._trend_col()
+        ema50_info_col = self._ema50_info_col()
+        ema200_info_col = self._ema200_info_col()
 
         touched_pullback_zone = (
             (dataframe["low"] <= dataframe["ema20"] * 1.002)
@@ -163,29 +343,46 @@ class LlmTrendPullbackStrategy(IStrategy):
         )
         rebound_confirmed = (
             (dataframe["close"] > dataframe["open"])
-            & (dataframe["close"] > dataframe["close"].shift(1))
+            & (dataframe["close"] > dataframe["close"].shift(1) * thresholds["rebound_over_prev"])
             & (dataframe["close"] > dataframe["ema20"])
         )
 
-        deterministic_entry = (
-            (dataframe["close"] > dataframe["ema200"])
-            & (dataframe["ema20"] > dataframe["ema50"])
-            & (dataframe["ema50"] > dataframe["ema200"])
-            & (dataframe["ema50_4h"] > dataframe["ema200_4h"] * 1.01)
-            & (dataframe["trend_4h"] == 1)
-            & (dataframe["rsi"] >= 44)
-            & (dataframe["rsi"] <= 58)
-            & (dataframe["adx"] >= 22)
-            & (dataframe["atr_pct"] >= 0.9)
-            & (dataframe["atr_pct"] <= 3.8)
-            & (dataframe["ema_spread_pct"] >= 0.15)
-            & (dataframe["close"] <= dataframe["ema20"] * 1.015)
-            & (dataframe["close"] >= dataframe["ema50"] * 0.98)
-            & (dataframe["volume"] > dataframe["vol_ma20"] * 0.8)
-            & (dataframe["volume_z"] > -0.6)
-            & touched_pullback_zone
-            & rebound_confirmed
-        )
+        if self._is_aggressive():
+            deterministic_entry = (
+                (dataframe["close"] > dataframe["ema20"])
+                & (dataframe["ema20"] >= dataframe["ema50"] * 0.998)
+                & (dataframe["rsi"] >= thresholds["rsi_min"])
+                & (dataframe["rsi"] <= thresholds["rsi_max"])
+                & ((dataframe["adx"] >= thresholds["adx_min"]) | (dataframe["ema_spread_pct"] > 0))
+                & (dataframe["atr_pct"] >= thresholds["atr_min"])
+                & (dataframe["atr_pct"] <= thresholds["atr_max"])
+                & (dataframe["ema_spread_pct"] >= thresholds["ema_spread_min"])
+                & (dataframe["close"] <= dataframe["ema20"] * thresholds["ema20_overext"])
+                & (dataframe["close"] >= dataframe["ema50"] * thresholds["pullback_floor"])
+                & (dataframe["volume"] > dataframe["vol_ma20"] * thresholds["vol_mult_min"])
+                & (dataframe["volume_z"] > thresholds["vol_z_min"])
+                & ((dataframe[trend_col] == 1) | (dataframe["close"] > dataframe["ema200"] * 0.98))
+            )
+        else:
+            deterministic_entry = (
+                (dataframe["close"] > dataframe["ema200"])
+                & (dataframe["ema20"] > dataframe["ema50"])
+                & (dataframe["ema50"] > dataframe["ema200"])
+                & (dataframe[ema50_info_col] > dataframe[ema200_info_col] * informative_trend_ratio)
+                & (dataframe[trend_col] == 1)
+                & (dataframe["rsi"] >= thresholds["rsi_min"])
+                & (dataframe["rsi"] <= thresholds["rsi_max"])
+                & (dataframe["adx"] >= thresholds["adx_min"])
+                & (dataframe["atr_pct"] >= thresholds["atr_min"])
+                & (dataframe["atr_pct"] <= thresholds["atr_max"])
+                & (dataframe["ema_spread_pct"] >= thresholds["ema_spread_min"])
+                & (dataframe["close"] <= dataframe["ema20"] * thresholds["ema20_overext"])
+                & (dataframe["close"] >= dataframe["ema50"] * thresholds["pullback_floor"])
+                & (dataframe["volume"] > dataframe["vol_ma20"] * thresholds["vol_mult_min"])
+                & (dataframe["volume_z"] > thresholds["vol_z_min"])
+                & touched_pullback_zone
+                & rebound_confirmed
+            )
 
         dataframe.loc[deterministic_entry, "enter_long"] = 1
         dataframe.loc[deterministic_entry, "enter_tag"] = "base_trend_pullback"
@@ -205,13 +402,73 @@ class LlmTrendPullbackStrategy(IStrategy):
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         dataframe["exit_long"] = 0
         dataframe["exit_tag"] = None
+        thresholds = self._exit_thresholds(metadata["pair"])
+        trend_col = self._trend_col()
 
         exit_condition = (
-            (dataframe["rsi"] > 76)
-            | ((dataframe["close"] < dataframe["ema20"] * 0.985) & (dataframe["adx"] < 20))
-            | (dataframe["close"] < dataframe["ema50"] * 0.98)
-            | (dataframe["trend_4h"] == 0)
+            (dataframe["rsi"] > thresholds["rsi_take"])
+            | (
+                (dataframe["close"] < dataframe["ema20"] * thresholds["ema20_break"])
+                & (dataframe["adx"] < thresholds["adx_weak"])
+            )
+            | (dataframe["close"] < dataframe["ema50"] * thresholds["ema50_break"])
+            | (dataframe[trend_col] == 0)
         )
         dataframe.loc[exit_condition, "exit_long"] = 1
         dataframe.loc[exit_condition, "exit_tag"] = "trend_break_or_overbought"
         return dataframe
+
+    def custom_stake_amount(
+        self,
+        pair: str,
+        current_time: datetime,
+        current_rate: float,
+        proposed_stake: float,
+        min_stake: Optional[float],
+        max_stake: float,
+        leverage: float,
+        entry_tag: Optional[str],
+        side: str,
+        **kwargs,
+    ) -> float:
+        stake = float(proposed_stake)
+        if self._is_risk_pair(pair):
+            stake *= self._risk_stake_multiplier()
+
+        if min_stake is not None:
+            stake = max(stake, float(min_stake))
+        if max_stake is not None:
+            stake = min(stake, float(max_stake))
+        return stake
+
+    def confirm_trade_entry(
+        self,
+        pair: str,
+        order_type: str,
+        amount: float,
+        rate: float,
+        time_in_force: str,
+        current_time: datetime,
+        entry_tag: Optional[str],
+        side: str,
+        **kwargs,
+    ) -> bool:
+        if not self._is_risk_pair(pair):
+            return True
+
+        max_risk_open = self._risk_max_open_trades()
+
+        open_trades = []
+        try:
+            if hasattr(Trade, "get_open_trades"):
+                open_trades = Trade.get_open_trades()
+            elif hasattr(Trade, "get_trades_proxy"):
+                open_trades = Trade.get_trades_proxy(is_open=True)
+        except Exception:
+            return True
+
+        risk_open_count = sum(1 for trade in open_trades if self._is_risk_pair(getattr(trade, "pair", "")))
+        if risk_open_count >= max_risk_open:
+            return False
+
+        return True

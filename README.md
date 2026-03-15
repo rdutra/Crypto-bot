@@ -1,285 +1,199 @@
-# Crypto Bot (Freqtrade + Ollama + Sidecar API)
+# Crypto Bot (Freqtrade + Ollama + Bot API)
 
-Backtest-first crypto trading bot stack with deterministic strategy logic and an optional LLM filter.
+Freqtrade executes trades, `bot-api` provides bounded LLM decisions, and Ollama runs the model locally.
 
-## Stack
+## 1) First-Time Setup (Dry-Run)
 
-- `freqtrade`: execution, dry-run, backtesting
-- `bot-api`: bounded classifier API (never places orders)
-- `ollama`: local model inference
-
-## Strategy
-
-`LlmTrendPullbackStrategy` implements:
-
-- 1h trend + pullback entries
-- 4h trend confirmation
-- volatility and momentum filters
-- built-in protections (`CooldownPeriod`, `StoplossGuard`, `MaxDrawdown`)
-- ATR-based dynamic stoploss
-- optional live/dry-run LLM gate on the latest signal only
-
-By default, LLM filtering is disabled (`ENABLE_LLM_FILTER=false`) so backtests remain deterministic.
-
-## Prerequisites
-
-- Docker + Docker Compose
-- Enough disk for historical candles and Ollama model weights
-
-## Full Runbook (Raw Docker Commands)
-
-1. Create local config from example:
+1. Create local files:
 
 ```bash
 cp freqtrade/user_data/config.json.example freqtrade/user_data/config.json
-```
-
-2. Create `.env` from the template:
-
-```bash
 cp .env.example .env
 ```
 
-3. Fill secrets in `.env`:
+2. Fill required secrets in `.env`:
 
 - `BINANCE_API_KEY`
 - `BINANCE_API_SECRET`
 - `FREQTRADE_API_JWT_SECRET`
 - `FREQTRADE_API_PASSWORD`
 
-Generate API secrets:
+3. Generate API secrets (if needed):
 
 ```bash
 openssl rand -hex 32
 openssl rand -base64 24
 ```
 
-4. Edit your local config (non-secret settings):
+4. Keep `dry_run: true` in `freqtrade/user_data/config.json`.
 
-- `freqtrade/user_data/config.json`
-- Keep `dry_run: true` for paper trading
-- Set pairs/stake/timeouts as needed
-
-5. Build and start infrastructure (`ollama` + `bot-api`):
+5. Build and start infra:
 
 ```bash
 docker compose up -d --build ollama bot-api
-```
-
-6. Confirm services are healthy:
-
-```bash
 docker compose ps
 curl -s http://localhost:8000/healthz
 ```
 
-7. Pull the local LLM model in the Ollama container:
+6. Pull model:
 
 ```bash
 docker compose exec -T ollama ollama pull llama3.1:8b
 ```
 
-8. Download market data using a one-off Freqtrade container command:
+## 2) Start Trading (Dry-Run)
+
+Standard dry-run:
 
 ```bash
-docker compose run --rm freqtrade download-data \
-  --config /freqtrade/user_data/config.json \
-  --timeframes 1h 4h \
-  --pairs BTC/USDT ETH/USDT \
-  --timerange 20230101-
+./scripts/run-dry-watch.sh --watch 30 --mode conservative
 ```
 
-9. Run deterministic backtest (LLM disabled explicitly):
+Aggressive dry-run:
 
 ```bash
-docker compose run --rm \
-  -e ENABLE_LLM_FILTER=false \
-  freqtrade backtesting \
-  --config /freqtrade/user_data/config.json \
-  --strategy-path /freqtrade/user_data/strategies \
-  --strategy LlmTrendPullbackStrategy \
-  --timeframe 1h \
-  --timerange 20230101- \
-  --export trades
+./scripts/run-dry-watch.sh --watch 30 --mode aggressive
 ```
 
-10. Start the bot in dry-run mode (and automated scheduler):
+Dry-run with risk-pair rotation before startup:
 
 ```bash
-docker compose up -d freqtrade scheduler
-docker compose logs -f --tail=100 freqtrade scheduler
+./scripts/run-dry-watch.sh --watch 30 --mode aggressive --rotate-risk-pairs
 ```
 
-11. Stop stack:
+Auto-stop when wallet drops below threshold:
 
 ```bash
-docker compose down
+./scripts/run-dry-watch.sh --watch 30 --stop-below 290
 ```
 
-## Script Shortcuts
+## 3) Backtesting
 
-- Bootstrap and pull model: `./scripts/bootstrap.sh llama3.1:8b`
-- Pull/update model only: `./scripts/pull-model.sh llama3.1:8b`
-- Download data: `./scripts/download-data.sh 20230101-`
-- Backtest all configured pairs: `./scripts/backtest.sh 20230101-`
-- Backtest one pair: `./scripts/backtest.sh 20230101- BTC/USDT`
-- Start dry-run and tail logs: `./scripts/start-dry-run.sh`
-
-## Automated Market Data Refresh
-
-Live/dry-run trading does not require manual data download, but backtesting/hyperopt does.
-
-### Option 1 (Recommended): Docker scheduler service
-
-Start scheduler:
-
-```bash
-docker compose up -d scheduler
-```
-
-Follow scheduler logs:
-
-```bash
-docker compose logs -f --tail=200 scheduler
-```
-
-Scheduler defaults are configured in `.env`:
-
-- `SCHED_DOWNLOAD_ENABLED=true`
-- `SCHED_DOWNLOAD_TIME=02:15` (daily)
-- `SCHED_DOWNLOAD_TIMERANGE=20230101-`
-- `SCHED_DOWNLOAD_PAIRS=BTC/USDT ETH/USDT`
-- `SCHED_PRUNE_ENABLED=true`
-- `SCHED_PRUNE_TIME=03:00`
-- `SCHED_PRUNE_WEEKDAY=0` (Sunday)
-- `SCHED_PRUNE_DAYS=180`
-
-Stop scheduler only:
-
-```bash
-docker compose stop scheduler
-```
-
-### Option 2: Daily host cron job
-
-1. Open crontab:
-
-```bash
-crontab -e
-```
-
-2. Add a daily refresh at 02:15:
-
-```cron
-15 2 * * * cd /Users/rodrigodutra/dev/personal/crypto-bot && /bin/bash ./scripts/download-data.sh 20230101- >> ./freqtrade/user_data/logs/download-data.log 2>&1
-```
-
-3. Verify cron entries:
-
-```bash
-crontab -l
-```
-
-### Option 3: Manual periodic refresh
+Download candles:
 
 ```bash
 ./scripts/download-data.sh 20230101-
 ```
 
-### Option 4: Weekly prune old candle files
-
-Preview files older than 180 days:
+Backtest deterministic strategy:
 
 ```bash
-find ./freqtrade/user_data/data -type f \( -name "*.feather" -o -name "*.parquet" \) -mtime +180 -print
+./scripts/backtest.sh 20230101-
 ```
 
-Delete files older than 180 days (run only after preview looks correct):
+## 4) LLM Pair Rotation (With Logging)
+
+Preview LLM-selected risk pairs:
 
 ```bash
-find ./freqtrade/user_data/data -type f \( -name "*.feather" -o -name "*.parquet" \) -mtime +180 -delete
+./scripts/rotate-risk-pairs.sh
 ```
 
-Weekly cron example (Sunday 03:00):
-
-```cron
-0 3 * * 0 cd /Users/rodrigodutra/dev/personal/crypto-bot && /usr/bin/find ./freqtrade/user_data/data -type f \( -name "*.feather" -o -name "*.parquet" \) -mtime +180 -delete >> ./freqtrade/user_data/logs/prune-data.log 2>&1
-```
-
-## Production (Live Trading)
-
-Use this only after you validate backtests and dry-run behavior.
-
-1. Set live credentials in `.env`:
-
-- `BINANCE_API_KEY`
-- `BINANCE_API_SECRET`
-- `FREQTRADE_API_JWT_SECRET`
-- `FREQTRADE_API_PASSWORD`
-
-2. Switch config to live mode:
-
-- Edit `freqtrade/user_data/config.json`
-- Set `"dry_run": false`
-- Review `stake_amount`, `max_open_trades`, and `pair_whitelist`
-
-3. Build and start services:
+Apply selected pairs to `.env` (`RISK_PAIRS`):
 
 ```bash
-docker compose up -d --build ollama bot-api
-docker compose up -d freqtrade scheduler
+./scripts/rotate-risk-pairs.sh --apply
 ```
 
-4. Verify bot startup:
+Apply + restart freqtrade:
 
 ```bash
-docker compose ps
-docker compose logs -f --tail=200 freqtrade
+./scripts/rotate-risk-pairs.sh --apply --restart --mode aggressive
 ```
 
-5. Restart after config/env changes:
+Rotation logs are appended to:
+
+- `freqtrade/user_data/logs/llm-pair-rotation.log`
+
+Inspect latest decisions:
 
 ```bash
-docker compose up -d freqtrade scheduler
+tail -n 20 freqtrade/user_data/logs/llm-pair-rotation.log
 ```
 
-6. Stop live trading:
+The log includes:
+
+- selected pairs
+- per-pair regime/risk/confidence/note
+- deterministic score + final score
+- data source (`local` or `exchange`)
+- discovery notes and skipped pairs
+
+## 5) Live Trading (Production)
+
+1. Set `dry_run: false` in `freqtrade/user_data/config.json`.
+2. Start live mode (confirmation required):
 
 ```bash
-docker compose stop freqtrade
+./scripts/run-live-watch.sh --watch 30 --mode conservative
 ```
 
-## LLM Gate Controls
-
-Set on `freqtrade` service environment in `docker-compose.yml`:
-
-- `ENABLE_LLM_FILTER`: `true` or `false`
-- `LLM_MIN_CONFIDENCE`: default `0.65`
-- `BOT_API_URL`: default `http://bot-api:8000`
-
-## Credentials Handling
-
-- `freqtrade/user_data/config.json` intentionally keeps secret fields empty.
-- `docker compose` passes values from `.env` into the `freqtrade` container.
-- Freqtrade reads these as runtime overrides via:
-  - `FREQTRADE__EXCHANGE__KEY`
-  - `FREQTRADE__EXCHANGE__SECRET`
-  - `FREQTRADE__API_SERVER__JWT_SECRET_KEY`
-  - `FREQTRADE__API_SERVER__USERNAME`
-  - `FREQTRADE__API_SERVER__PASSWORD`
-- `.env` is gitignored and should never be committed.
-
-To enable LLM gating in dry-run/live:
-
-1. Set `ENABLE_LLM_FILTER: "true"` in `docker-compose.yml`
-2. Restart freqtrade:
+Aggressive live mode:
 
 ```bash
-docker compose up -d freqtrade
+./scripts/run-live-watch.sh --watch 30 --mode aggressive
 ```
+
+Live + risk-pair rotation before startup:
+
+```bash
+./scripts/run-live-watch.sh --watch 30 --mode aggressive --rotate-risk-pairs
+```
+
+## 6) Useful Logs
+
+Freqtrade + scheduler logs:
+
+```bash
+docker compose logs -f --tail=200 freqtrade scheduler
+```
+
+Wallet status / manual stop:
+
+```bash
+./scripts/wallet-control.sh
+./scripts/wallet-control.sh --stop
+```
+
+## 7) Key `.env` Controls
+
+Core strategy:
+
+- `STRATEGY_MODE=conservative|aggressive`
+- `ENABLE_LLM_FILTER=true|false`
+- `LLM_MIN_CONFIDENCE=0.65`
+- `CORE_PAIRS=...`
+- `RISK_PAIRS=...`
+
+LLM rotation:
+
+- `LLM_ROTATE_AUTO_DISCOVER=true`
+- `LLM_ROTATE_DATA_SOURCE=auto` (`local|exchange|auto`)
+- `LLM_ROTATE_EXCHANGE=binance`
+- `LLM_ROTATE_QUOTE=USDT`
+- `LLM_ROTATE_MAX_CANDIDATES=20`
+- `LLM_ROTATE_MIN_QUOTE_VOLUME=20000000`
+- `LLM_ROTATE_EXCLUDE_REGEX=(UP|DOWN|BULL|BEAR|1000|[0-9][0-9][0-9]+L|[0-9][0-9][0-9]+S)`
+- `LLM_ROTATE_TOP_N=3`
+- `LLM_ROTATE_MIN_CONFIDENCE=0.60`
+- `LLM_ROTATE_ALLOWED_RISK=low medium`
+- `LLM_ROTATE_ALLOWED_REGIMES=trend_pullback` (aggressive default in script: `trend_pullback breakout mean_reversion`)
+- `LLM_ROTATE_SYNC_WHITELIST=true`
+- `LLM_ROTATE_LOG_PATH=./freqtrade/user_data/logs/llm-pair-rotation.log`
+
+Scheduler:
+
+- `SCHED_DOWNLOAD_ENABLED=true`
+- `SCHED_DOWNLOAD_TIME=02:15`
+- `SCHED_DOWNLOAD_TIMERANGE=20230101-`
+- `SCHED_DOWNLOAD_PAIRS=...`
+- `SCHED_PRUNE_ENABLED=true`
+- `SCHED_PRUNE_TIME=03:00`
+- `SCHED_PRUNE_WEEKDAY=0`
+- `SCHED_PRUNE_DAYS=180`
 
 ## Safety
 
-- Keep `dry_run: true` until you validate backtests and paper trade behavior.
-- Use Binance API key IP restrictions and do not enable withdrawals.
-- Start with small stake and conservative pair whitelist.
+- Keep `dry_run=true` until behavior is validated.
+- Start with small stake and low `max_open_trades`.
+- Use API key IP restrictions and disable withdrawals.
