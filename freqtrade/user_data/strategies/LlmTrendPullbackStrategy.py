@@ -579,9 +579,9 @@ class LlmTrendPullbackStrategy(IStrategy):
         dataframe["volume_z"] = dataframe["volume_z"].fillna(0.0)
         dataframe["ema_spread_pct"] = ((dataframe["ema20"] - dataframe["ema50"]) / dataframe["close"]) * 100.0
         dataframe[bench_inf_trend_col] = 0
-        dataframe[bench_tf_trend_col] = 0
-        dataframe[bench_tf_adx_col] = 0.0
-        dataframe[bench_tf_spread_col] = 0.0
+        dataframe[bench_tf_trend_col] = np.nan
+        dataframe[bench_tf_adx_col] = np.nan
+        dataframe[bench_tf_spread_col] = np.nan
         dataframe[bench_tf_close_col] = np.nan
         dataframe[bench_tf_ema20_col] = np.nan
 
@@ -728,11 +728,19 @@ class LlmTrendPullbackStrategy(IStrategy):
                 if strict_aggr
                 else ((dataframe["adx"] >= thresholds["adx_min"]) | (dataframe["ema_spread_pct"] > 0))
             )
-            trend_ok = (
-                ((dataframe[trend_col] == 1) | (dataframe["close"] > dataframe["ema200"] * 1.0))
-                if strict_aggr
-                else ((dataframe[trend_col] == 1) | (dataframe["close"] > dataframe["ema200"] * 0.98))
-            )
+            if strict_aggr:
+                # Stricter trend gate: require informative trend alignment and a real margin above EMA200.
+                trend_ok = (
+                    (dataframe[trend_col] == 1)
+                    & (dataframe["close"] > dataframe["ema200"] * 1.005)
+                    & (dataframe["ema50"] > dataframe["ema200"])
+                )
+            else:
+                # Normal aggressive mode keeps a fallback path, but much tighter than the previous 0.98x EMA200.
+                trend_ok = (
+                    ((dataframe[trend_col] == 1) & (dataframe["close"] > dataframe["ema200"] * 0.995))
+                    | (dataframe["close"] > dataframe["ema200"] * 1.01)
+                )
             deterministic_entry = (
                 (dataframe["close"] > dataframe["ema20"])
                 & (dataframe["ema20"] >= dataframe["ema50"] * 0.998)
@@ -949,7 +957,10 @@ class LlmTrendPullbackStrategy(IStrategy):
                 bench_chaos = self._safe_float(row.get("bench_chaos"), 0.0) >= 0.5
                 if bench_weak or bench_chaos:
                     if self._is_risk_pair(pair):
-                        stake *= self._benchmark_risk_stake_mult_when_weak()
+                        # When benchmark filtering is enabled for risk pairs, weak benchmark already blocks entry.
+                        # In that mode, risk stake reduction is effectively redundant at entry time.
+                        if not self._benchmark_filter_for_risk():
+                            stake *= self._benchmark_risk_stake_mult_when_weak()
                     else:
                         stake *= self._benchmark_core_stake_mult_when_weak()
 
