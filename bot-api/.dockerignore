@@ -1,0 +1,19 @@
+# VCS
+.git
+.gitignore
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Env and local files
+.env
+.env.*
+.venv/
+venv/
+
+# Runtime artifacts
+*.log

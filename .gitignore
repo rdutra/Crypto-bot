@@ -1,0 +1,42 @@
+# OS
+.DS_Store
+
+# Editor/IDE
+.vscode/
+.idea/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Logs/runtime
+*.log
+*.pid
+
+# Freqtrade runtime artifacts
+freqtrade/user_data/config.json
+freqtrade/user_data/logs/
+freqtrade/user_data/data/
+freqtrade/user_data/backtest_results/
+freqtrade/user_data/hyperopt_results/
+freqtrade/user_data/plot/
+freqtrade/user_data/tradesv3.sqlite*
+
+# Local overrides
+*.local

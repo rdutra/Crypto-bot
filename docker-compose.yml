@@ -1,0 +1,69 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    # For NVIDIA GPU on Linux, uncomment:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  bot-api:
+    build: ./bot-api
+    container_name: bot-api
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: llama3.1:8b
+      OLLAMA_TIMEOUT: 30
+    ports:
+      - "8000:8000"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ./bot-api:/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/healthz\", timeout=2)'"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+
+  freqtrade:
+    image: freqtradeorg/freqtrade:stable
+    container_name: freqtrade
+    restart: unless-stopped
+    depends_on:
+      bot-api:
+        condition: service_healthy
+    environment:
+      BOT_API_URL: http://bot-api:8000
+      ENABLE_LLM_FILTER: "false"
+      LLM_MIN_CONFIDENCE: "0.65"
+    volumes:
+      - ./freqtrade/user_data:/freqtrade/user_data
+    ports:
+      - "8080:8080"
+    command: >
+      trade
+      --logfile /freqtrade/user_data/logs/freqtrade.log
+      --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
+      --config /freqtrade/user_data/config.json
+      --strategy-path /freqtrade/user_data/strategies
+      --strategy LlmTrendPullbackStrategy
+
+volumes:
+  ollama_data:
