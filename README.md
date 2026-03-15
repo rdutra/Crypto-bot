@@ -55,6 +55,12 @@ Aggressive dry-run:
 ./scripts/run-dry-watch.sh --watch 30 --mode aggressive
 ```
 
+After changing `.env` strategy values, recreate `freqtrade` to apply them:
+
+```bash
+docker compose up -d --force-recreate freqtrade
+```
+
 Dry-run with risk-pair rotation before startup:
 
 ```bash
@@ -164,6 +170,23 @@ Core strategy:
 - `LLM_MIN_CONFIDENCE=0.65`
 - `CORE_PAIRS=...`
 - `RISK_PAIRS=...`
+- `STRATEGY_MINIMAL_ROI_JSON={"0":0.05,"180":0.025,"720":0.0}` (optional override)
+- `STRATEGY_STOPLOSS=-0.08` (optional override)
+- `STRATEGY_TRAILING_STOP=true|false` (optional override; keep `false` when using `custom_stoploss`)
+- `STRATEGY_TRAILING_POSITIVE=0.015` (optional override)
+- `STRATEGY_TRAILING_OFFSET=0.04` (optional override)
+- `EXIT_USE_RSI_TAKE=false` (default off; enables RSI-based take-profit exits)
+- `STALE_TRADE_HOURS=24` and `STALE_MIN_PROFIT=0.01` (close stale low-progress trades)
+- `STALE_LOSS_HOURS=12` and `STALE_LOSS_PCT=-0.02` (faster stale loser cut)
+- `STALE_MAX_HOURS=72` (hard max holding age unless trade is strong)
+- `CUSTOM_SL_ATR_MULT=1.6`, `CUSTOM_SL_MIN=-0.08`, `CUSTOM_SL_MAX=-0.015` (dynamic custom stoploss)
+- `AGGR_ENTRY_STRICTNESS=strict|normal` (aggressive entry gate profile; default `strict`)
+- `BENCHMARK_PAIR=BTC/USDT` (benchmark market used for regime filter)
+- `BENCHMARK_FILTER_FOR_RISK=true` and `BENCHMARK_ALLOW_NEUTRAL_FOR_RISK=false` (gate alt/risk entries by BTC regime)
+- `BENCHMARK_CHAOS_ADX=16` and `BENCHMARK_MIN_SPREAD_PCT=-0.05` (BTC chaos definition)
+- `BENCHMARK_REDUCE_STAKE_WHEN_WEAK=true` with `BENCHMARK_RISK_STAKE_MULT_WHEN_WEAK=0.6` and `BENCHMARK_CORE_STAKE_MULT_WHEN_WEAK=0.85`
+- `ENTRY_RANKING_ENABLED=true`, `ENTRY_TOP_N=1`, `ENTRY_MIN_SCORE=0.58` (take only best candidates)
+- `ENTRY_RANKING_LOG=true|false` (defaults to on in live/dry-run, off in backtests)
 
 LLM rotation:
 

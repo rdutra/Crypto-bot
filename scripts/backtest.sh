@@ -12,7 +12,6 @@ docker compose run --rm \
   --config /freqtrade/user_data/config.json \
   --strategy-path /freqtrade/user_data/strategies \
   --strategy LlmTrendPullbackStrategy \
-  --timeframe 1h \
   --pairs "${PAIR_ARR[@]}" \
   --timerange "${TIMERANGE}" \
   --export trades
