@@ -1,6 +1,5 @@
 import os
-from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import requests
@@ -14,13 +13,13 @@ class LlmTrendPullbackStrategy(IStrategy):
     informative_timeframe = "4h"
     can_short = False
 
-    minimal_roi = {"0": 0.08, "240": 0.03, "720": 0.0}
-    stoploss = -0.08
-    trailing_stop = True
+    minimal_roi = {"0": 0.05, "360": 0.02, "1080": 0.0}
+    stoploss = -0.06
+    trailing_stop = False
     trailing_stop_positive = 0.02
     trailing_stop_positive_offset = 0.04
     trailing_only_offset_is_reached = True
-    use_custom_stoploss = True
+    use_custom_stoploss = False
 
     startup_candle_count = 250
     process_only_new_candles = True
@@ -126,6 +125,7 @@ class LlmTrendPullbackStrategy(IStrategy):
             [np.inf, -np.inf], np.nan
         )
         dataframe["volume_z"] = dataframe["volume_z"].fillna(0.0)
+        dataframe["ema_spread_pct"] = ((dataframe["ema20"] - dataframe["ema50"]) / dataframe["close"]) * 100.0
 
         if self.dp:
             informative = self.dp.get_pair_dataframe(pair=metadata["pair"], timeframe=self.informative_timeframe)
@@ -143,8 +143,12 @@ class LlmTrendPullbackStrategy(IStrategy):
                 dataframe["trend_4h"] = dataframe["trend_4h"].fillna(0).astype("int8")
             else:
                 dataframe["trend_4h"] = 0
+                dataframe["ema50_4h"] = np.nan
+                dataframe["ema200_4h"] = np.nan
         else:
             dataframe["trend_4h"] = 0
+            dataframe["ema50_4h"] = np.nan
+            dataframe["ema200_4h"] = np.nan
 
         return dataframe
 
@@ -152,19 +156,35 @@ class LlmTrendPullbackStrategy(IStrategy):
         dataframe["enter_long"] = 0
         dataframe["enter_tag"] = None
 
+        touched_pullback_zone = (
+            (dataframe["low"] <= dataframe["ema20"] * 1.002)
+            | (dataframe["low"] <= dataframe["ema50"] * 1.01)
+            | (dataframe["close"].shift(1) <= dataframe["ema20"].shift(1) * 1.001)
+        )
+        rebound_confirmed = (
+            (dataframe["close"] > dataframe["open"])
+            & (dataframe["close"] > dataframe["close"].shift(1))
+            & (dataframe["close"] > dataframe["ema20"])
+        )
+
         deterministic_entry = (
             (dataframe["close"] > dataframe["ema200"])
             & (dataframe["ema20"] > dataframe["ema50"])
             & (dataframe["ema50"] > dataframe["ema200"])
+            & (dataframe["ema50_4h"] > dataframe["ema200_4h"] * 1.01)
             & (dataframe["trend_4h"] == 1)
-            & (dataframe["rsi"] >= 40)
-            & (dataframe["rsi"] <= 55)
-            & (dataframe["adx"] > 18)
-            & (dataframe["atr_pct"] >= 0.8)
-            & (dataframe["atr_pct"] <= 4.5)
-            & (dataframe["close"] <= dataframe["ema20"] * 1.01)
+            & (dataframe["rsi"] >= 44)
+            & (dataframe["rsi"] <= 58)
+            & (dataframe["adx"] >= 22)
+            & (dataframe["atr_pct"] >= 0.9)
+            & (dataframe["atr_pct"] <= 3.8)
+            & (dataframe["ema_spread_pct"] >= 0.15)
+            & (dataframe["close"] <= dataframe["ema20"] * 1.015)
             & (dataframe["close"] >= dataframe["ema50"] * 0.98)
-            & (dataframe["volume_z"] > -1.0)
+            & (dataframe["volume"] > dataframe["vol_ma20"] * 0.8)
+            & (dataframe["volume_z"] > -0.6)
+            & touched_pullback_zone
+            & rebound_confirmed
         )
 
         dataframe.loc[deterministic_entry, "enter_long"] = 1
@@ -187,31 +207,11 @@ class LlmTrendPullbackStrategy(IStrategy):
         dataframe["exit_tag"] = None
 
         exit_condition = (
-            (dataframe["rsi"] > 72)
-            | (dataframe["close"] < dataframe["ema20"])
-            | ((dataframe["close"] < dataframe["ema50"] * 0.985) & (dataframe["adx"] < 16))
+            (dataframe["rsi"] > 76)
+            | ((dataframe["close"] < dataframe["ema20"] * 0.985) & (dataframe["adx"] < 20))
+            | (dataframe["close"] < dataframe["ema50"] * 0.98)
+            | (dataframe["trend_4h"] == 0)
         )
         dataframe.loc[exit_condition, "exit_long"] = 1
-        dataframe.loc[exit_condition, "exit_tag"] = "rsi_or_trend_break"
+        dataframe.loc[exit_condition, "exit_tag"] = "trend_break_or_overbought"
         return dataframe
-
-    def custom_stoploss(
-        self,
-        pair: str,
-        trade,
-        current_time: datetime,
-        current_rate: float,
-        current_profit: float,
-        after_fill: bool = False,
-        **kwargs,
-    ) -> Optional[float]:
-        if not self.dp:
-            return self.stoploss
-
-        dataframe, _ = self.dp.get_analyzed_dataframe(pair=pair, timeframe=self.timeframe)
-        if dataframe.empty:
-            return self.stoploss
-
-        atr_pct = float(dataframe.iloc[-1].get("atr_pct", 2.0))
-        dynamic_sl = max(0.015, min(0.08, atr_pct * 0.8 / 100.0))
-        return -dynamic_sl

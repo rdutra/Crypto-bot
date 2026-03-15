@@ -37,7 +37,6 @@ run_download() {
   # shellcheck disable=SC2086
   if freqtrade download-data \
     --config /freqtrade/user_data/config.json \
-    --strategy-path /freqtrade/user_data/strategies \
     --timeframes 1h 4h \
     --pairs ${SCHED_DOWNLOAD_PAIRS} \
     --timerange "${SCHED_DOWNLOAD_TIMERANGE}" \

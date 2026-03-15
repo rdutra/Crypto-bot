@@ -84,7 +84,6 @@ docker compose exec -T ollama ollama pull llama3.1:8b
 ```bash
 docker compose run --rm freqtrade download-data \
   --config /freqtrade/user_data/config.json \
-  --strategy-path /freqtrade/user_data/strategies \
   --timeframes 1h 4h \
   --pairs BTC/USDT ETH/USDT \
   --timerange 20230101-
@@ -122,7 +121,8 @@ docker compose down
 - Bootstrap and pull model: `./scripts/bootstrap.sh llama3.1:8b`
 - Pull/update model only: `./scripts/pull-model.sh llama3.1:8b`
 - Download data: `./scripts/download-data.sh 20230101-`
-- Backtest: `./scripts/backtest.sh 20230101-`
+- Backtest all configured pairs: `./scripts/backtest.sh 20230101-`
+- Backtest one pair: `./scripts/backtest.sh 20230101- BTC/USDT`
 - Start dry-run and tail logs: `./scripts/start-dry-run.sh`
 
 ## Automated Market Data Refresh
