@@ -26,7 +26,7 @@ services:
     container_name: bot-api
     environment:
       OLLAMA_BASE_URL: http://ollama:11434
-      OLLAMA_MODEL: llama3.1:8b
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
       OLLAMA_TIMEOUT: 30
     ports:
       - "8000:8000"
@@ -53,6 +53,11 @@ services:
       BOT_API_URL: http://bot-api:8000
       ENABLE_LLM_FILTER: "false"
       LLM_MIN_CONFIDENCE: "0.65"
+      FREQTRADE__EXCHANGE__KEY: ${BINANCE_API_KEY:-}
+      FREQTRADE__EXCHANGE__SECRET: ${BINANCE_API_SECRET:-}
+      FREQTRADE__API_SERVER__JWT_SECRET_KEY: ${FREQTRADE_API_JWT_SECRET:-}
+      FREQTRADE__API_SERVER__USERNAME: ${FREQTRADE_API_USERNAME:-freqtrade}
+      FREQTRADE__API_SERVER__PASSWORD: ${FREQTRADE_API_PASSWORD:-}
     volumes:
       - ./freqtrade/user_data:/freqtrade/user_data
     ports:

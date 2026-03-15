@@ -30,8 +30,8 @@
   },
   "exchange": {
     "name": "binance",
-    "key": "YOUR_BINANCE_KEY",
-    "secret": "YOUR_BINANCE_SECRET",
+    "key": "",
+    "secret": "",
     "ccxt_config": {
       "enableRateLimit": true
     },
@@ -55,9 +55,9 @@
     "listen_port": 8080,
     "verbosity": "error",
     "enable_openapi": true,
-    "jwt_secret_key": "CHANGE_ME_FREQTRADE_API_JWT",
+    "jwt_secret_key": "",
     "username": "freqtrade",
-    "password": "CHANGE_ME_FREQTRADE_API_PASSWORD"
+    "password": ""
   },
   "initial_state": "running",
   "force_entry_enable": false,
