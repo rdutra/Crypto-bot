@@ -104,11 +104,11 @@ docker compose run --rm \
   --export trades
 ```
 
-10. Start the bot in dry-run mode:
+10. Start the bot in dry-run mode (and automated scheduler):
 
 ```bash
-docker compose up -d freqtrade
-docker compose logs -f --tail=100 freqtrade
+docker compose up -d freqtrade scheduler
+docker compose logs -f --tail=100 freqtrade scheduler
 ```
 
 11. Stop stack:
@@ -124,6 +124,87 @@ docker compose down
 - Download data: `./scripts/download-data.sh 20230101-`
 - Backtest: `./scripts/backtest.sh 20230101-`
 - Start dry-run and tail logs: `./scripts/start-dry-run.sh`
+
+## Automated Market Data Refresh
+
+Live/dry-run trading does not require manual data download, but backtesting/hyperopt does.
+
+### Option 1 (Recommended): Docker scheduler service
+
+Start scheduler:
+
+```bash
+docker compose up -d scheduler
+```
+
+Follow scheduler logs:
+
+```bash
+docker compose logs -f --tail=200 scheduler
+```
+
+Scheduler defaults are configured in `.env`:
+
+- `SCHED_DOWNLOAD_ENABLED=true`
+- `SCHED_DOWNLOAD_TIME=02:15` (daily)
+- `SCHED_DOWNLOAD_TIMERANGE=20230101-`
+- `SCHED_DOWNLOAD_PAIRS=BTC/USDT ETH/USDT`
+- `SCHED_PRUNE_ENABLED=true`
+- `SCHED_PRUNE_TIME=03:00`
+- `SCHED_PRUNE_WEEKDAY=0` (Sunday)
+- `SCHED_PRUNE_DAYS=180`
+
+Stop scheduler only:
+
+```bash
+docker compose stop scheduler
+```
+
+### Option 2: Daily host cron job
+
+1. Open crontab:
+
+```bash
+crontab -e
+```
+
+2. Add a daily refresh at 02:15:
+
+```cron
+15 2 * * * cd /Users/rodrigodutra/dev/personal/crypto-bot && /bin/bash ./scripts/download-data.sh 20230101- >> ./freqtrade/user_data/logs/download-data.log 2>&1
+```
+
+3. Verify cron entries:
+
+```bash
+crontab -l
+```
+
+### Option 3: Manual periodic refresh
+
+```bash
+./scripts/download-data.sh 20230101-
+```
+
+### Option 4: Weekly prune old candle files
+
+Preview files older than 180 days:
+
+```bash
+find ./freqtrade/user_data/data -type f \( -name "*.feather" -o -name "*.parquet" \) -mtime +180 -print
+```
+
+Delete files older than 180 days (run only after preview looks correct):
+
+```bash
+find ./freqtrade/user_data/data -type f \( -name "*.feather" -o -name "*.parquet" \) -mtime +180 -delete
+```
+
+Weekly cron example (Sunday 03:00):
+
+```cron
+0 3 * * 0 cd /Users/rodrigodutra/dev/personal/crypto-bot && /usr/bin/find ./freqtrade/user_data/data -type f \( -name "*.feather" -o -name "*.parquet" \) -mtime +180 -delete >> ./freqtrade/user_data/logs/prune-data.log 2>&1
+```
 
 ## Production (Live Trading)
 
@@ -146,7 +227,7 @@ Use this only after you validate backtests and dry-run behavior.
 
 ```bash
 docker compose up -d --build ollama bot-api
-docker compose up -d freqtrade
+docker compose up -d freqtrade scheduler
 ```
 
 4. Verify bot startup:
@@ -159,7 +240,7 @@ docker compose logs -f --tail=200 freqtrade
 5. Restart after config/env changes:
 
 ```bash
-docker compose up -d freqtrade
+docker compose up -d freqtrade scheduler
 ```
 
 6. Stop live trading:

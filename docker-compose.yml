@@ -70,5 +70,28 @@ services:
       --strategy-path /freqtrade/user_data/strategies
       --strategy LlmTrendPullbackStrategy
 
+  scheduler:
+    image: freqtradeorg/freqtrade:stable
+    container_name: freqtrade-scheduler
+    restart: unless-stopped
+    environment:
+      FREQTRADE__EXCHANGE__KEY: ${BINANCE_API_KEY:-}
+      FREQTRADE__EXCHANGE__SECRET: ${BINANCE_API_SECRET:-}
+      SCHED_DOWNLOAD_ENABLED: ${SCHED_DOWNLOAD_ENABLED:-true}
+      SCHED_DOWNLOAD_TIME: ${SCHED_DOWNLOAD_TIME:-02:15}
+      SCHED_DOWNLOAD_TIMERANGE: ${SCHED_DOWNLOAD_TIMERANGE:-20230101-}
+      SCHED_DOWNLOAD_PAIRS: ${SCHED_DOWNLOAD_PAIRS:-BTC/USDT ETH/USDT}
+      SCHED_PRUNE_ENABLED: ${SCHED_PRUNE_ENABLED:-true}
+      SCHED_PRUNE_TIME: ${SCHED_PRUNE_TIME:-03:00}
+      SCHED_PRUNE_WEEKDAY: ${SCHED_PRUNE_WEEKDAY:-0}
+      SCHED_PRUNE_DAYS: ${SCHED_PRUNE_DAYS:-180}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./freqtrade/user_data:/freqtrade/user_data
+      - ./scripts:/workspace/scripts:ro
+      - scheduler_state:/freqtrade/scheduler_state
+    entrypoint: ["/bin/sh", "/workspace/scripts/maintenance-loop.sh"]
+
 volumes:
   ollama_data:
+  scheduler_state:
