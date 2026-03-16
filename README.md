@@ -38,7 +38,7 @@ curl -s http://localhost:8000/healthz
 6. Pull model:
 
 ```bash
-docker compose exec -T ollama ollama pull llama3.1:8b
+docker compose exec -T ollama ollama pull qwen3:8b
 ```
 
 ## 2) Start Trading (Dry-Run)
@@ -161,7 +161,58 @@ Wallet status / manual stop:
 ./scripts/wallet-control.sh --stop
 ```
 
-## 7) Key `.env` Controls
+## 7) Spike Scanner Alerts (Separate Service)
+
+Run scanner service (optional profile):
+
+```bash
+docker compose --profile scanner up -d --build spike-scanner
+```
+
+Dashboard:
+
+```bash
+open http://localhost:8091
+```
+
+Watch scanner logs:
+
+```bash
+docker compose logs -f --tail=200 spike-scanner
+```
+
+Alert output file (JSONL):
+
+```bash
+tail -f freqtrade/user_data/logs/spike-alerts.jsonl
+```
+
+Prediction database (SQLite):
+
+```bash
+ls -lh freqtrade/user_data/logs/spike-scanner.sqlite
+```
+
+Optional notifications (Telegram/Discord) are sent on startup and each alert when configured.
+
+Stop scanner:
+
+```bash
+docker compose --profile scanner stop spike-scanner
+```
+
+Notes:
+
+- Scanner is alert-only (no trading), runs as a separate service.
+- It reuses existing env variables where possible: `BINANCE_REST_BASE`, `BINANCE_WS_BASE`, `LLM_ROTATE_QUOTE`, `LLM_ROTATE_MIN_QUOTE_VOLUME`, `LLM_ROTATE_EXCLUDE_REGEX`.
+- The scanner now stores predictions and evaluates outcomes at configured horizons (default `60,240,1440,2880` minutes).
+- Optional LLM shadow mode can score the same alerts via `bot-api` and store a parallel verdict (`allowed/blocked/unknown`) for later comparison.
+- API endpoint `GET /api/alerts?limit=200`
+- API endpoint `GET /api/outcomes?limit=300&status=resolved|pending`
+- API endpoint `GET /api/summary`
+- API endpoint `GET /api/llm-evals?limit=200` (recent LLM shadow evaluations by symbol)
+
+## 8) Key `.env` Controls
 
 Core strategy:
 
@@ -215,7 +266,44 @@ Scheduler:
 - `SCHED_PRUNE_WEEKDAY=0`
 - `SCHED_PRUNE_DAYS=180`
 
-## Safety
+Spike scanner:
+
+- `BINANCE_REST_BASE=https://api.binance.com`
+- `BINANCE_WS_BASE=wss://stream.binance.com:9443/stream`
+- `SPIKE_QUOTE_ASSET=USDT` (optional override; defaults to `LLM_ROTATE_QUOTE`)
+- `SPIKE_MIN_QUOTE_VOLUME=20000000` (optional override; defaults to `LLM_ROTATE_MIN_QUOTE_VOLUME`)
+- `SPIKE_EXCLUDE_REGEX=...` (optional override; defaults to `LLM_ROTATE_EXCLUDE_REGEX`)
+- `SPIKE_INCLUDE_SYMBOLS=...` (optional explicit include list)
+- `SPIKE_EXCLUDE_SYMBOLS=BTCUSDT ETHUSDT`
+- `SPIKE_UNIVERSE_MAX_SYMBOLS=60`
+- `SPIKE_TOP_N_ALERTS=5`
+- `SPIKE_MIN_SCORE=0.80`
+- `SPIKE_MAX_SPREAD_PCT=0.30`
+- `SPIKE_ALERT_COOLDOWN_MINUTES=30`
+- `SPIKE_LOOP_SECONDS=5`
+- `SPIKE_LOG_PATH=/data/spike-alerts.jsonl`
+- `SPIKE_DB_PATH=/data/spike-scanner.sqlite`
+- `SPIKE_OUTCOME_HORIZONS_MINUTES=60,240,1440,2880`
+- `SPIKE_OUTCOME_LOOP_SECONDS=30`
+- `SPIKE_OUTCOME_BATCH_SIZE=200`
+- `SPIKE_LLM_SHADOW_ENABLED=false`
+- `SPIKE_LLM_SHADOW_BOT_API_URL=http://bot-api:8000`
+- `SPIKE_LLM_SHADOW_TIMEOUT_SECONDS=6`
+- `SPIKE_LLM_SHADOW_MIN_CONFIDENCE=0.65`
+- `SPIKE_LLM_SHADOW_ALLOWED_REGIMES=trend_pullback,breakout`
+- `SPIKE_LLM_SHADOW_ALLOWED_RISK_LEVELS=low,medium`
+- `SPIKE_LLM_SHADOW_EVAL_TOP_N=5` (evaluate top N scored symbols per cycle)
+- `SPIKE_LLM_SHADOW_EVAL_MIN_SCORE=0.70` (minimum deterministic score to evaluate)
+- `SPIKE_LLM_SHADOW_EVAL_CACHE_SECONDS=300` (reuse per-symbol LLM result to limit API load)
+- `SPIKE_WEB_ENABLED=true`
+- `SPIKE_WEB_HOST=0.0.0.0`
+- `SPIKE_WEB_PORT=8090` and `SPIKE_WEB_PUBLIC_PORT=8091`
+- `SPIKE_NOTIFY_ENABLED=true`
+- `SPIKE_NOTIFY_TIMEOUT_SECONDS=10`
+- `SPIKE_TELEGRAM_BOT_TOKEN=...` and `SPIKE_TELEGRAM_CHAT_ID=...` (or generic `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`)
+- `SPIKE_DISCORD_WEBHOOK_URL=...` (or generic `DISCORD_WEBHOOK_URL`)
+
+## 9) Safety
 
 - Keep `dry_run=true` until behavior is validated.
 - Start with small stake and low `max_open_trades`.
