@@ -90,8 +90,14 @@ class LlmTrendPullbackStrategy(IStrategy):
     def _is_aggressive(self) -> bool:
         return STRATEGY_MODE == "aggressive"
 
+    def _protections_disabled(self) -> bool:
+        return _env_bool("DISABLE_PROTECTIONS", False)
+
     @property
     def protections(self):
+        if self._protections_disabled():
+            return []
+
         if self._is_aggressive():
             return [
                 {"method": "CooldownPeriod", "stop_duration_candles": 2},
@@ -491,6 +497,16 @@ class LlmTrendPullbackStrategy(IStrategy):
         except ValueError:
             return 0.65
 
+    def _llm_connect_timeout_seconds(self) -> float:
+        return self._float_env("LLM_CONNECT_TIMEOUT_SECONDS", 2.0, 0.5, 15.0)
+
+    def _llm_read_timeout_seconds(self) -> float:
+        default = 15.0 if self._is_aggressive() else 10.0
+        return self._float_env("LLM_READ_TIMEOUT_SECONDS", default, 1.0, 90.0)
+
+    def _llm_fail_open(self) -> bool:
+        return _env_bool("LLM_FAIL_OPEN", False)
+
     def _market_structure(self, row: Any) -> str:
         if row["close"] > row["ema20"] > row["ema50"] > row["ema200"]:
             return "higher_highs"
@@ -528,9 +544,12 @@ class LlmTrendPullbackStrategy(IStrategy):
         }
         bot_api = os.getenv("BOT_API_URL", "http://bot-api:8000")
         min_conf = self._llm_min_confidence()
+        connect_timeout = self._llm_connect_timeout_seconds()
+        read_timeout = self._llm_read_timeout_seconds()
+        fail_open = self._llm_fail_open()
 
         try:
-            response = requests.post(f"{bot_api}/classify", json=payload, timeout=(2, 5))
+            response = requests.post(f"{bot_api}/classify", json=payload, timeout=(connect_timeout, read_timeout))
             response.raise_for_status()
             data = response.json()
             regime = str(data.get("regime", "")).lower()
@@ -539,9 +558,24 @@ class LlmTrendPullbackStrategy(IStrategy):
 
             allowed = regime == "trend_pullback" and risk_level in {"low", "medium"} and confidence >= min_conf
             reason = f"{regime}:{risk_level}:{confidence:.2f}"
-        except Exception:
-            allowed = False
-            reason = "llm_error"
+        except requests.Timeout:
+            allowed = fail_open
+            reason = "llm_timeout_allow" if fail_open else "llm_timeout"
+            LOGGER.warning(
+                "LLM classify timeout for %s (connect=%.1fs read=%.1fs). fail_open=%s",
+                pair,
+                connect_timeout,
+                read_timeout,
+                fail_open,
+            )
+        except requests.RequestException as exc:
+            allowed = fail_open
+            reason = "llm_http_error_allow" if fail_open else "llm_http_error"
+            LOGGER.warning("LLM classify request error for %s: %s fail_open=%s", pair, exc, fail_open)
+        except Exception as exc:
+            allowed = fail_open
+            reason = "llm_error_allow" if fail_open else "llm_error"
+            LOGGER.warning("LLM classify unexpected error for %s: %s fail_open=%s", pair, exc, fail_open)
 
         self._llm_cache[cache_key] = (allowed, reason)
         return allowed, reason

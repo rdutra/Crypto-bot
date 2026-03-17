@@ -1,3 +1,5 @@
+import json
+import logging
 import math
 import time
 from statistics import mean, pstdev
@@ -7,6 +9,8 @@ import aiohttp
 
 from app.config import Settings
 from app.state import SymbolState
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _ema(values: list[float], period: int) -> float | None:
@@ -122,7 +126,9 @@ class LlmShadowDecider:
 
     def _build_payload(self, symbol: str, state: SymbolState) -> dict[str, Any] | None:
         klines = list(state.kline_1m)
-        if len(klines) < 30:
+        # Keep aligned with deterministic scorer warm-up to avoid repeated
+        # "insufficient_data" evaluations for symbols that are already scoreable.
+        if len(klines) < 20:
             return None
 
         closes = [float(k["close"]) for k in klines]
@@ -181,22 +187,74 @@ class LlmShadowDecider:
         url = self.settings.llm_shadow_bot_api_url.rstrip("/") + "/classify"
         timeout = aiohttp.ClientTimeout(total=max(2, self.settings.llm_shadow_timeout_seconds))
         started = time.monotonic()
+        body: Any = None
 
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(url, json=payload) as resp:
                     status = int(resp.status)
-                    body = await resp.json(content_type=None)
+                    response_text = await resp.text()
                     if status >= 300:
+                        LOGGER.warning(
+                            "LLM shadow http error symbol=%s status=%s body=%s",
+                            symbol.upper(),
+                            status,
+                            response_text[:200],
+                        )
                         return {
                             "allowed": None,
                             "reason": f"http_{status}",
+                            "latency_ms": int((time.monotonic() - started) * 1000),
                             "cached": False,
                         }
-        except Exception:
+                    try:
+                        body = json.loads(response_text)
+                    except Exception:
+                        LOGGER.warning(
+                            "LLM shadow invalid JSON symbol=%s body=%s",
+                            symbol.upper(),
+                            response_text[:200],
+                        )
+                        return {
+                            "allowed": None,
+                            "reason": "invalid_json",
+                            "latency_ms": int((time.monotonic() - started) * 1000),
+                            "cached": False,
+                        }
+        except TimeoutError:
+            LOGGER.warning(
+                "LLM shadow timeout symbol=%s timeout_s=%s",
+                symbol.upper(),
+                self.settings.llm_shadow_timeout_seconds,
+            )
+            return {
+                "allowed": None,
+                "reason": "timeout",
+                "latency_ms": int((time.monotonic() - started) * 1000),
+                "cached": False,
+            }
+        except aiohttp.ClientConnectorError as exc:
+            LOGGER.warning("LLM shadow connect error symbol=%s error=%s", symbol.upper(), exc)
+            return {
+                "allowed": None,
+                "reason": "connect_error",
+                "latency_ms": int((time.monotonic() - started) * 1000),
+                "cached": False,
+            }
+        except aiohttp.ClientError as exc:
+            LOGGER.warning("LLM shadow client error symbol=%s error=%s", symbol.upper(), exc)
+            return {
+                "allowed": None,
+                "reason": "client_error",
+                "latency_ms": int((time.monotonic() - started) * 1000),
+                "cached": False,
+            }
+        except Exception as exc:
+            LOGGER.warning("LLM shadow unexpected error symbol=%s error=%s", symbol.upper(), exc)
             return {
                 "allowed": None,
                 "reason": "llm_error",
+                "latency_ms": int((time.monotonic() - started) * 1000),
                 "cached": False,
             }
 
@@ -204,6 +262,7 @@ class LlmShadowDecider:
             return {
                 "allowed": None,
                 "reason": "invalid_response",
+                "latency_ms": int((time.monotonic() - started) * 1000),
                 "cached": False,
             }
 

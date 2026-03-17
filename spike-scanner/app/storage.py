@@ -283,7 +283,7 @@ class PredictionStore:
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def fetch_recent_alerts(self, limit: int = 200) -> list[dict[str, Any]]:
+    def fetch_recent_alerts(self, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
         cur = self.conn.cursor()
         rows = cur.execute(
             """
@@ -292,8 +292,9 @@ class PredictionStore:
             FROM alerts
             ORDER BY id DESC
             LIMIT ?
+            OFFSET ?
             """,
-            (int(limit),),
+            (int(limit), int(offset)),
         ).fetchall()
 
         data = []
@@ -306,7 +307,7 @@ class PredictionStore:
             data.append(item)
         return data
 
-    def fetch_recent_outcomes(self, limit: int = 300, status: str | None = None) -> list[dict[str, Any]]:
+    def fetch_recent_outcomes(self, limit: int = 300, status: str | None = None, offset: int = 0) -> list[dict[str, Any]]:
         cur = self.conn.cursor()
         if status in {"pending", "resolved"}:
             rows = cur.execute(
@@ -319,8 +320,9 @@ class PredictionStore:
                 WHERE o.status = ?
                 ORDER BY o.id DESC
                 LIMIT ?
+                OFFSET ?
                 """,
-                (status, int(limit)),
+                (status, int(limit), int(offset)),
             ).fetchall()
         else:
             rows = cur.execute(
@@ -332,13 +334,14 @@ class PredictionStore:
                 JOIN alerts a ON a.id = o.alert_id
                 ORDER BY o.id DESC
                 LIMIT ?
+                OFFSET ?
                 """,
-                (int(limit),),
+                (int(limit), int(offset)),
             ).fetchall()
 
         return [dict(row) for row in rows]
 
-    def fetch_recent_llm_shadow_evals(self, limit: int = 200) -> list[dict[str, Any]]:
+    def fetch_recent_llm_shadow_evals(self, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
         cur = self.conn.cursor()
         rows = cur.execute(
             """
@@ -347,8 +350,9 @@ class PredictionStore:
             FROM llm_shadow_evals
             ORDER BY id DESC
             LIMIT ?
+            OFFSET ?
             """,
-            (int(limit),),
+            (int(limit), int(offset)),
         ).fetchall()
         return [dict(row) for row in rows]
 

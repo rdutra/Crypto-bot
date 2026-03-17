@@ -35,6 +35,14 @@ docker compose ps
 curl -s http://localhost:8000/healthz
 ```
 
+Important:
+- `spike-scanner` uses the `scanner` profile and does not start with the default command above.
+- Start it explicitly with:
+
+```bash
+docker compose --profile scanner up -d --build spike-scanner
+```
+
 6. Pull model:
 
 ```bash
@@ -169,6 +177,12 @@ Run scanner service (optional profile):
 docker compose --profile scanner up -d --build spike-scanner
 ```
 
+Recreate scanner after config/env changes:
+
+```bash
+docker compose --profile scanner up -d --force-recreate spike-scanner
+```
+
 Dashboard:
 
 ```bash
@@ -219,6 +233,9 @@ Core strategy:
 - `STRATEGY_MODE=conservative|aggressive`
 - `ENABLE_LLM_FILTER=true|false`
 - `LLM_MIN_CONFIDENCE=0.65`
+- `LLM_CONNECT_TIMEOUT_SECONDS=2`
+- `LLM_READ_TIMEOUT_SECONDS=15` (increase for slower local models like `qwen3:8b`)
+- `LLM_FAIL_OPEN=false` (set `true` to avoid blocking entries when LLM is temporarily unavailable)
 - `CORE_PAIRS=...`
 - `RISK_PAIRS=...`
 - `STRATEGY_MINIMAL_ROI_JSON={"0":0.05,"180":0.025,"720":0.0}` (optional override)
@@ -288,7 +305,7 @@ Spike scanner:
 - `SPIKE_OUTCOME_BATCH_SIZE=200`
 - `SPIKE_LLM_SHADOW_ENABLED=false`
 - `SPIKE_LLM_SHADOW_BOT_API_URL=http://bot-api:8000`
-- `SPIKE_LLM_SHADOW_TIMEOUT_SECONDS=6`
+- `SPIKE_LLM_SHADOW_TIMEOUT_SECONDS=45` (raise this for slower local models, e.g. `qwen3:8b`)
 - `SPIKE_LLM_SHADOW_MIN_CONFIDENCE=0.65`
 - `SPIKE_LLM_SHADOW_ALLOWED_REGIMES=trend_pullback,breakout`
 - `SPIKE_LLM_SHADOW_ALLOWED_RISK_LEVELS=low,medium`

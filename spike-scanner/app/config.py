@@ -68,7 +68,7 @@ class Settings(BaseModel):
     outcome_batch_size: int = _env_int("SPIKE_OUTCOME_BATCH_SIZE", 200)
     llm_shadow_enabled: bool = _env_bool("SPIKE_LLM_SHADOW_ENABLED", False)
     llm_shadow_bot_api_url: str = _env_str("SPIKE_LLM_SHADOW_BOT_API_URL", _env_str("BOT_API_URL", "http://bot-api:8000"))
-    llm_shadow_timeout_seconds: int = _env_int("SPIKE_LLM_SHADOW_TIMEOUT_SECONDS", 6)
+    llm_shadow_timeout_seconds: int = _env_int("SPIKE_LLM_SHADOW_TIMEOUT_SECONDS", 45)
     llm_shadow_min_confidence: float = _env_float("SPIKE_LLM_SHADOW_MIN_CONFIDENCE", 0.65)
     llm_shadow_allowed_regimes: str = _env_str("SPIKE_LLM_SHADOW_ALLOWED_REGIMES", "trend_pullback,breakout")
     llm_shadow_allowed_risk_levels: str = _env_str("SPIKE_LLM_SHADOW_ALLOWED_RISK_LEVELS", "low,medium")

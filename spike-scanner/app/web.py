@@ -39,11 +39,53 @@ def _fmt_llm_allowed(value) -> str:
     return "unknown"
 
 
+def _parse_int(raw_value, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _pager_html(request: web.Request, param: str, page: int, has_next: bool) -> str:
+    query = dict(request.query)
+    parts: list[str] = []
+    if page > 1:
+        query[param] = str(page - 1)
+        prev_href = str(request.rel_url.with_query(query))
+        parts.append(f'<a href="{_esc(prev_href)}">Prev</a>')
+    if has_next:
+        query[param] = str(page + 1)
+        next_href = str(request.rel_url.with_query(query))
+        parts.append(f'<a href="{_esc(next_href)}">Next</a>')
+    if not parts:
+        return ""
+    return " | ".join(parts)
+
+
 async def dashboard(request: web.Request) -> web.Response:
     store: PredictionStore = request.app["store"]
-    alerts = store.fetch_recent_alerts(limit=100)
-    outcomes = store.fetch_recent_outcomes(limit=200)
-    llm_evals = store.fetch_recent_llm_shadow_evals(limit=200)
+    page_size = _parse_int(request.query.get("page_size"), 40, 10, 200)
+    alerts_page = _parse_int(request.query.get("alerts_page"), 1, 1, 100000)
+    outcomes_page = _parse_int(request.query.get("outcomes_page"), 1, 1, 100000)
+    evals_page = _parse_int(request.query.get("evals_page"), 1, 1, 100000)
+
+    alerts_offset = (alerts_page - 1) * page_size
+    outcomes_offset = (outcomes_page - 1) * page_size
+    evals_offset = (evals_page - 1) * page_size
+
+    alerts_raw = store.fetch_recent_alerts(limit=page_size + 1, offset=alerts_offset)
+    outcomes_raw = store.fetch_recent_outcomes(limit=page_size + 1, offset=outcomes_offset)
+    llm_evals_raw = store.fetch_recent_llm_shadow_evals(limit=page_size + 1, offset=evals_offset)
+
+    alerts_has_next = len(alerts_raw) > page_size
+    outcomes_has_next = len(outcomes_raw) > page_size
+    evals_has_next = len(llm_evals_raw) > page_size
+
+    alerts = alerts_raw[:page_size]
+    outcomes = outcomes_raw[:page_size]
+    llm_evals = llm_evals_raw[:page_size]
+
     summary = store.fetch_horizon_summary()
     llm_summary = store.fetch_llm_outcome_summary()
 
@@ -133,6 +175,10 @@ async def dashboard(request: web.Request) -> web.Response:
         ]
     )
 
+    alerts_pager = _pager_html(request, "alerts_page", alerts_page, alerts_has_next)
+    outcomes_pager = _pager_html(request, "outcomes_page", outcomes_page, outcomes_has_next)
+    evals_pager = _pager_html(request, "evals_page", evals_page, evals_has_next)
+
     html = f"""
 <!doctype html>
 <html lang="en">
@@ -149,6 +195,7 @@ async def dashboard(request: web.Request) -> web.Response:
     th {{ background: #f5f5f5; }}
     .wrap {{ overflow-x: auto; }}
     .muted {{ color: #666; font-size: 13px; }}
+    .pager {{ margin-top: 8px; }}
   </style>
 </head>
 <body>
@@ -164,12 +211,14 @@ async def dashboard(request: web.Request) -> web.Response:
   </div>
 
   <h2>Recent Predictions</h2>
+  <div class="muted">Page size: {page_size}</div>
   <div class="wrap">
     <table>
       <thead><tr><th>ID</th><th>Timestamp</th><th>Symbol</th><th>Score</th><th>Entry Price</th><th>LLM Allowed</th><th>LLM Regime</th><th>LLM Risk</th><th>LLM Conf</th><th>LLM Reason</th></tr></thead>
       <tbody>{alert_rows}</tbody>
     </table>
   </div>
+  <div class="muted pager">{alerts_pager}</div>
 
   <h2>LLM Shadow Outcomes</h2>
   <div class="wrap">
@@ -191,6 +240,7 @@ async def dashboard(request: web.Request) -> web.Response:
       <tbody>{llm_eval_rows}</tbody>
     </table>
   </div>
+  <div class="muted pager">{evals_pager}</div>
 
   <h2>Recent Outcomes</h2>
   <div class="wrap">
@@ -204,6 +254,7 @@ async def dashboard(request: web.Request) -> web.Response:
       <tbody>{outcome_rows}</tbody>
     </table>
   </div>
+  <div class="muted pager">{outcomes_pager}</div>
 </body>
 </html>
 """
@@ -213,15 +264,30 @@ async def dashboard(request: web.Request) -> web.Response:
 async def api_alerts(request: web.Request) -> web.Response:
     store: PredictionStore = request.app["store"]
     limit = int(request.query.get("limit", "200"))
-    return web.json_response({"items": store.fetch_recent_alerts(limit=max(1, min(2000, limit)))})
+    offset = int(request.query.get("offset", "0"))
+    return web.json_response(
+        {
+            "items": store.fetch_recent_alerts(
+                limit=max(1, min(2000, limit)),
+                offset=max(0, min(500000, offset)),
+            )
+        }
+    )
 
 
 async def api_outcomes(request: web.Request) -> web.Response:
     store: PredictionStore = request.app["store"]
     limit = int(request.query.get("limit", "300"))
+    offset = int(request.query.get("offset", "0"))
     status = request.query.get("status")
     return web.json_response(
-        {"items": store.fetch_recent_outcomes(limit=max(1, min(3000, limit)), status=status)}
+        {
+            "items": store.fetch_recent_outcomes(
+                limit=max(1, min(3000, limit)),
+                status=status,
+                offset=max(0, min(500000, offset)),
+            )
+        }
     )
 
 
@@ -238,7 +304,15 @@ async def api_summary(request: web.Request) -> web.Response:
 async def api_llm_evals(request: web.Request) -> web.Response:
     store: PredictionStore = request.app["store"]
     limit = int(request.query.get("limit", "200"))
-    return web.json_response({"items": store.fetch_recent_llm_shadow_evals(limit=max(1, min(5000, limit)))})
+    offset = int(request.query.get("offset", "0"))
+    return web.json_response(
+        {
+            "items": store.fetch_recent_llm_shadow_evals(
+                limit=max(1, min(5000, limit)),
+                offset=max(0, min(500000, offset)),
+            )
+        }
+    )
 
 
 def create_app(store: PredictionStore) -> web.Application:
