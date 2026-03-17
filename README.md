@@ -2,6 +2,8 @@
 
 Freqtrade executes trades, `bot-api` provides bounded LLM decisions, and Ollama runs the model locally.
 
+Need the shortest path to run everything? See `QUICKSTART.md`.
+
 ## 1) First-Time Setup (Dry-Run)
 
 1. Create local files:
@@ -113,6 +115,24 @@ Apply + restart freqtrade:
 
 ```bash
 ./scripts/rotate-risk-pairs.sh --apply --restart --mode aggressive
+```
+
+Run periodic automatic rotation (recommended if you want continuous refresh):
+
+```bash
+./scripts/rotate-risk-pairs-loop.sh --mode aggressive --interval-minutes 60
+```
+
+One-shot loop test:
+
+```bash
+./scripts/rotate-risk-pairs-loop.sh --once --mode aggressive
+```
+
+Optional background run:
+
+```bash
+nohup ./scripts/rotate-risk-pairs-loop.sh --mode aggressive --interval-minutes 60 > freqtrade/user_data/logs/rotate-loop.log 2>&1 &
 ```
 
 Rotation logs are appended to:
@@ -234,10 +254,11 @@ Core strategy:
 - `ENABLE_LLM_FILTER=true|false`
 - `LLM_MIN_CONFIDENCE=0.65`
 - `LLM_CONNECT_TIMEOUT_SECONDS=2`
-- `LLM_READ_TIMEOUT_SECONDS=15` (increase for slower local models like `qwen3:8b`)
-- `LLM_FAIL_OPEN=false` (set `true` to avoid blocking entries when LLM is temporarily unavailable)
+- `LLM_READ_TIMEOUT_SECONDS=45` recommended for slower local models like `qwen3:8b` (`15` is often too low)
+- `LLM_FAIL_OPEN=true` recommended in live/dry-run to avoid blocking entries when LLM is temporarily unavailable
 - `CORE_PAIRS=...`
 - `RISK_PAIRS=...`
+- Keep `exchange.pair_whitelist` lean (usually `CORE_PAIRS + RISK_PAIRS`) to avoid slow analysis cycles and missed signals.
 - `STRATEGY_MINIMAL_ROI_JSON={"0":0.05,"180":0.025,"720":0.0}` (optional override)
 - `STRATEGY_STOPLOSS=-0.08` (optional override)
 - `STRATEGY_TRAILING_STOP=true|false` (optional override; keep `false` when using `custom_stoploss`)
@@ -271,6 +292,8 @@ LLM rotation:
 - `LLM_ROTATE_ALLOWED_REGIMES=trend_pullback` (aggressive default in script: `trend_pullback breakout mean_reversion`)
 - `LLM_ROTATE_SYNC_WHITELIST=true`
 - `LLM_ROTATE_LOG_PATH=./freqtrade/user_data/logs/llm-pair-rotation.log`
+- `LLM_ROTATE_LOOP_INTERVAL_MINUTES=60` (used by `rotate-risk-pairs-loop.sh`)
+- `LLM_ROTATE_LOOP_JITTER_SECONDS=0` (optional random delay before each cycle)
 
 Scheduler:
 
@@ -307,7 +330,7 @@ Spike scanner:
 - `SPIKE_LLM_SHADOW_BOT_API_URL=http://bot-api:8000`
 - `SPIKE_LLM_SHADOW_TIMEOUT_SECONDS=45` (raise this for slower local models, e.g. `qwen3:8b`)
 - `SPIKE_LLM_SHADOW_MIN_CONFIDENCE=0.65`
-- `SPIKE_LLM_SHADOW_ALLOWED_REGIMES=trend_pullback,breakout`
+- `SPIKE_LLM_SHADOW_ALLOWED_REGIMES=trend_pullback,breakout,mean_reversion`
 - `SPIKE_LLM_SHADOW_ALLOWED_RISK_LEVELS=low,medium`
 - `SPIKE_LLM_SHADOW_EVAL_TOP_N=5` (evaluate top N scored symbols per cycle)
 - `SPIKE_LLM_SHADOW_EVAL_MIN_SCORE=0.70` (minimum deterministic score to evaluate)

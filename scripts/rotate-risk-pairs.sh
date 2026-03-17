@@ -856,12 +856,34 @@ fi
 echo ""
 echo "Selected risk pairs: ${selected_pairs}"
 
+risk_changed="$(
+  python3 - "${current_risk_pairs}" "${selected_pairs}" <<'PY'
+import sys
+
+def norm(raw: str):
+    parts = [p.strip().upper() for p in raw.replace(",", " ").split() if p.strip()]
+    seen = set()
+    ordered = []
+    for part in parts:
+        if part in seen:
+            continue
+        seen.add(part)
+        ordered.append(part)
+    return ordered
+
+old = norm(sys.argv[1])
+new = norm(sys.argv[2])
+print("true" if old != new else "false")
+PY
+)"
+
 if [[ "${APPLY}" != "true" ]]; then
   echo "Preview only. Re-run with --apply to write .env."
   exit 0
 fi
 
-python3 - "${ENV_FILE}" "RISK_PAIRS" "${selected_pairs}" <<'PY'
+if [[ "${risk_changed}" == "true" ]]; then
+  python3 - "${ENV_FILE}" "RISK_PAIRS" "${selected_pairs}" <<'PY'
 import sys
 from pathlib import Path
 
@@ -891,8 +913,10 @@ if not found:
 
 env_path.write_text("\n".join(lines) + "\n")
 PY
-
-echo "Updated .env -> RISK_PAIRS=${selected_pairs}"
+  echo "Updated .env -> RISK_PAIRS=${selected_pairs}"
+else
+  echo "RISK_PAIRS unchanged -> ${selected_pairs}"
+fi
 
 if is_true "${SYNC_WHITELIST}"; then
   python3 - "${CONFIG_FILE}" "${core_pairs}" "${selected_pairs}" <<'PY'
@@ -928,8 +952,12 @@ PY
 fi
 
 if [[ "${RESTART}" == "true" ]]; then
-  echo "Restarting freqtrade with mode=${MODE}..."
-  STRATEGY_MODE="${MODE}" docker compose up -d freqtrade
+  if [[ "${risk_changed}" == "true" ]]; then
+    echo "Restarting freqtrade with mode=${MODE}..."
+    STRATEGY_MODE="${MODE}" docker compose up -d freqtrade
+  else
+    echo "Skipping freqtrade restart (selected pairs unchanged)."
+  fi
 else
   echo "Tip: restart freqtrade to apply updated pair configuration."
 fi

@@ -131,6 +131,29 @@ services:
       - scheduler_state:/freqtrade/scheduler_state
     entrypoint: ["/bin/sh", "/workspace/scripts/maintenance-loop.sh"]
 
+  pair-rotator:
+    image: docker:cli
+    container_name: pair-rotator
+    restart: unless-stopped
+    depends_on:
+      bot-api:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    working_dir: /workspace
+    environment:
+      LLM_BOT_API_URL: http://bot-api:8000
+      STRATEGY_MODE: ${STRATEGY_MODE:-aggressive}
+      LLM_ROTATE_LOOP_INTERVAL_MINUTES: ${LLM_ROTATE_LOOP_INTERVAL_MINUTES:-60}
+      LLM_ROTATE_LOOP_JITTER_SECONDS: ${LLM_ROTATE_LOOP_JITTER_SECONDS:-0}
+    volumes:
+      - ./:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    command:
+      - /bin/sh
+      - -lc
+      - apk add --no-cache bash python3 py3-pip curl jq >/dev/null && exec bash ./scripts/rotate-risk-pairs-loop.sh --mode ${STRATEGY_MODE:-aggressive} --interval-minutes ${LLM_ROTATE_LOOP_INTERVAL_MINUTES:-60}
+
   spike-scanner:
     build: ./spike-scanner
     container_name: spike-scanner
