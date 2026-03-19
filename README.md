@@ -1,6 +1,6 @@
 # Crypto Bot (Freqtrade + Ollama + Bot API)
 
-Freqtrade executes trades, `bot-api` provides bounded LLM decisions, and Ollama runs the model locally.
+Freqtrade executes trades, `bot-api` provides bounded LLM decisions, and the LLM backend can be either local Ollama or an external OpenAI-compatible API.
 
 Need the shortest path to run everything? See `QUICKSTART.md`.
 
@@ -43,7 +43,7 @@ Important:
 - `spike-scanner` is part of the default stack.
 - Scanner health is available at `http://localhost:8091/healthz`.
 
-6. Pull model:
+6. Pull local model if you are using `LLM_PROVIDER=ollama`:
 
 ```bash
 docker compose exec -T ollama ollama pull llama3.1:8b
@@ -60,6 +60,16 @@ OLLAMA_NUM_PARALLEL=2
 OLLAMA_MAX_LOADED_MODELS=1
 OLLAMA_KEEP_ALIVE=10m
 docker compose up -d --force-recreate ollama bot-api spike-scanner
+```
+
+Optional external LLM instead of Ollama:
+
+```bash
+LLM_PROVIDER=openai_compatible
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=your_api_key
+LLM_MODEL=gpt-4.1-mini
+docker compose up -d --force-recreate bot-api
 ```
 
 ## 2) Start Trading (Dry-Run)
@@ -283,6 +293,15 @@ Core strategy:
 - `LLM_MIN_CONFIDENCE=0.65`
 - `LLM_CONNECT_TIMEOUT_SECONDS=2`
 - `LLM_READ_TIMEOUT_SECONDS=45` is only needed for slower local models like `qwen3:8b`
+- `LLM_PROVIDER=ollama|openai_compatible`
+- `LLM_BASE_URL=https://api.openai.com/v1` (used when `LLM_PROVIDER=openai_compatible`)
+- `LLM_API_KEY=...` (used when `LLM_PROVIDER=openai_compatible`)
+- `LLM_MODEL=...` (generic model override for external providers; Ollama still uses `OLLAMA_MODEL`)
+- `LLM_TIMEOUT=...` (generic provider timeout override; falls back to `OLLAMA_TIMEOUT`)
+- `LLM_OPENAI_CHAT_PATH=/chat/completions`
+- `LLM_OPENAI_RESPONSE_FORMAT_JSON=true`
+- `LLM_OPENAI_MAX_COMPLETION_TOKENS=...` (optional)
+- `LLM_OPENAI_TEMPERATURE=0.1`
 - `OLLAMA_TIMEOUT=30` is the preferred fast-fail baseline for `bot-api` model calls
 - `LLM_FAIL_OPEN=true` recommended in live/dry-run to avoid blocking entries when LLM is temporarily unavailable
 - `LLM_DEBUG_ENABLED=true`, `LLM_DEBUG_MAX_ENTRIES=250` (in-memory hot cache)

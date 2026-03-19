@@ -20,11 +20,21 @@ Fill required values in `.env`:
 
 Keep `dry_run: true` in `freqtrade/user_data/config.json` for paper trading.
 
-Pull the model:
+Pull the local model if using `LLM_PROVIDER=ollama`:
 
 ```bash
 docker compose up -d --build ollama
 docker compose exec -T ollama ollama pull llama3.1:8b
+```
+
+Optional external LLM:
+
+```bash
+LLM_PROVIDER=openai_compatible
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=your_api_key
+LLM_MODEL=gpt-4.1-mini
+docker compose up -d --force-recreate bot-api
 ```
 
 Optional: tune Ollama resources in `.env` for faster responses, then recreate:

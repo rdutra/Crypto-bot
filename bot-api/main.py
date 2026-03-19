@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Dict, List
 
-import httpx
 from fastapi import FastAPI, HTTPException
 
 from api_models import (
@@ -26,6 +25,7 @@ from api_models import (
     SkillItemsResponse,
 )
 from debug_store import LlmDebugStore
+from llm_client import LlmClient, LlmClientSettings
 from llm_logic import (
     build_policy_prompt,
     build_rank_prompt,
@@ -49,9 +49,10 @@ from skill_providers import (
 app = FastAPI(title="bot-api", version="1.0.0")
 logger = logging.getLogger("bot-api")
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
-OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "30"))
+LLM_CLIENT = LlmClient(LlmClientSettings.from_env())
+LLM_PROVIDER = LLM_CLIENT.provider_name
+LLM_MODEL = LLM_CLIENT.model_name
+LLM_BASE_URL = LLM_CLIENT.base_url
 
 
 SKILL_SERVICE = SkillService()
@@ -166,7 +167,7 @@ def _record_llm_call(
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "endpoint": endpoint,
-        "model": OLLAMA_MODEL,
+        "model": LLM_MODEL,
         "parsed_ok": bool(parsed_ok),
         "error": (error or "")[:240],
         "prompt": _clip_text(prompt, LLM_DEBUG_PROMPT_MAX_CHARS),
@@ -508,26 +509,18 @@ async def _rank_via_single_classify(req: RankPairsRequest) -> tuple[Dict[str, Ll
 
 
 async def _run_ollama(prompt: str) -> str:
-    request_body = {
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.1},
-    }
-    async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
-        response = await client.post(f"{OLLAMA_BASE_URL}/api/generate", json=request_body)
-        response.raise_for_status()
-        ollama_json = response.json()
-        return str(ollama_json.get("response", "")).strip()
+    return await LLM_CLIENT.run(prompt)
 
 
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     return {
         "status": "ok",
-        "ollama_base_url": OLLAMA_BASE_URL,
-        "ollama_model": OLLAMA_MODEL,
+        "llm_provider": LLM_PROVIDER,
+        "llm_base_url": LLM_BASE_URL,
+        "llm_model": LLM_MODEL,
+        "ollama_base_url": LLM_BASE_URL if LLM_PROVIDER == "ollama" else "",
+        "ollama_model": LLM_MODEL if LLM_PROVIDER == "ollama" else "",
         "skill_provider": SKILL_PROVIDER_NAME,
         "market_rank_skill_enabled": MARKET_RANK_SKILL_ENABLED,
         "trading_signal_skill_enabled": TRADING_SIGNAL_SKILL_ENABLED,

@@ -33,6 +33,15 @@ services:
     build: ./bot-api
     container_name: bot-api
     environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-}
+      LLM_OPENAI_CHAT_PATH: ${LLM_OPENAI_CHAT_PATH:-/chat/completions}
+      LLM_OPENAI_RESPONSE_FORMAT_JSON: ${LLM_OPENAI_RESPONSE_FORMAT_JSON:-true}
+      LLM_OPENAI_MAX_COMPLETION_TOKENS: ${LLM_OPENAI_MAX_COMPLETION_TOKENS:-}
+      LLM_OPENAI_TEMPERATURE: ${LLM_OPENAI_TEMPERATURE:-0.1}
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
       OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-90}
