@@ -1,8 +1,11 @@
 import json
+import logging
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+LOGGER = logging.getLogger(__name__)
 
 
 class PredictionStore:
@@ -10,12 +13,15 @@ class PredictionStore:
         self.jsonl_path = jsonl_path
         self.db_path = db_path
         self.horizons_minutes = horizons_minutes
+        self.orphan_outcomes_pruned = 0
 
         os.makedirs(os.path.dirname(self.jsonl_path), exist_ok=True)
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
 
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        # Keep relational integrity active for every connection.
+        self.conn.execute("PRAGMA foreign_keys = ON")
         self._init_db()
 
     def _init_db(self) -> None:
@@ -51,7 +57,7 @@ class PredictionStore:
                 observed_price REAL,
                 return_pct REAL,
                 status TEXT NOT NULL DEFAULT 'pending',
-                FOREIGN KEY(alert_id) REFERENCES alerts(id),
+                FOREIGN KEY(alert_id) REFERENCES alerts(id) ON DELETE CASCADE,
                 UNIQUE(alert_id, horizon_minutes)
             )
             """
@@ -77,9 +83,13 @@ class PredictionStore:
             """
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_status_due ON outcomes(status, due_ts)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_alert_id ON outcomes(alert_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_llm_shadow_evals_ts ON llm_shadow_evals(ts)")
         self._ensure_alert_columns()
+        self.orphan_outcomes_pruned = self._cleanup_orphan_outcomes()
+        if self.orphan_outcomes_pruned > 0:
+            LOGGER.warning("Pruned %s orphan outcomes rows from scanner DB.", self.orphan_outcomes_pruned)
         self.conn.commit()
 
     def _ensure_alert_columns(self) -> None:
@@ -98,6 +108,17 @@ class PredictionStore:
             if column in existing:
                 continue
             cur.execute(f"ALTER TABLE alerts ADD COLUMN {column} {col_type}")
+
+    def _cleanup_orphan_outcomes(self) -> int:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            DELETE FROM outcomes
+            WHERE alert_id NOT IN (SELECT id FROM alerts)
+            """
+        )
+        deleted = int(cur.rowcount or 0)
+        return max(0, deleted)
 
     @staticmethod
     def _utc_now() -> datetime:
@@ -283,18 +304,46 @@ class PredictionStore:
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def fetch_recent_alerts(self, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
+    def fetch_recent_alerts(
+        self,
+        limit: int = 200,
+        offset: int = 0,
+        symbol: str | None = None,
+        llm_allowed: int | None = None,
+        ts_from: str | None = None,
+        ts_to: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+
+        if symbol:
+            where.append("symbol = ?")
+            params.append(str(symbol).upper())
+        if llm_allowed in {0, 1}:
+            where.append("llm_allowed = ?")
+            params.append(int(llm_allowed))
+        elif llm_allowed == -1:
+            where.append("llm_allowed IS NULL")
+        if ts_from:
+            where.append("ts >= ?")
+            params.append(str(ts_from))
+        if ts_to:
+            where.append("ts < ?")
+            params.append(str(ts_to))
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         cur = self.conn.cursor()
         rows = cur.execute(
-            """
+            f"""
             SELECT id, ts, symbol, score, entry_price, meta_json,
                    llm_allowed, llm_regime, llm_risk_level, llm_confidence, llm_note, llm_reason, llm_latency_ms
             FROM alerts
+            {where_sql}
             ORDER BY id DESC
             LIMIT ?
             OFFSET ?
             """,
-            (int(limit), int(offset)),
+            (*params, int(limit), int(offset)),
         ).fetchall()
 
         data = []
@@ -307,68 +356,220 @@ class PredictionStore:
             data.append(item)
         return data
 
-    def fetch_recent_outcomes(self, limit: int = 300, status: str | None = None, offset: int = 0) -> list[dict[str, Any]]:
+    def count_alerts(
+        self,
+        symbol: str | None = None,
+        llm_allowed: int | None = None,
+        ts_from: str | None = None,
+        ts_to: str | None = None,
+    ) -> int:
+        where: list[str] = []
+        params: list[Any] = []
+        if symbol:
+            where.append("symbol = ?")
+            params.append(str(symbol).upper())
+        if llm_allowed in {0, 1}:
+            where.append("llm_allowed = ?")
+            params.append(int(llm_allowed))
+        elif llm_allowed == -1:
+            where.append("llm_allowed IS NULL")
+        if ts_from:
+            where.append("ts >= ?")
+            params.append(str(ts_from))
+        if ts_to:
+            where.append("ts < ?")
+            params.append(str(ts_to))
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         cur = self.conn.cursor()
+        row = cur.execute(
+            f"SELECT COUNT(*) AS total FROM alerts {where_sql}",
+            tuple(params),
+        ).fetchone()
+        return int(row["total"]) if row and row["total"] is not None else 0
+
+    def fetch_recent_outcomes(
+        self,
+        limit: int = 300,
+        status: str | None = None,
+        offset: int = 0,
+        symbol: str | None = None,
+        llm_allowed: int | None = None,
+        ts_from: str | None = None,
+        ts_to: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
         if status in {"pending", "resolved"}:
-            rows = cur.execute(
-                """
-                SELECT o.id, o.alert_id, a.ts AS alert_ts, o.symbol, o.horizon_minutes,
-                       a.entry_price, o.due_ts, o.resolved_ts, o.observed_price, o.return_pct, o.status,
-                       a.llm_allowed, a.llm_regime, a.llm_risk_level, a.llm_confidence, a.llm_note, a.llm_reason
-                FROM outcomes o
-                JOIN alerts a ON a.id = o.alert_id
-                WHERE o.status = ?
-                ORDER BY o.id DESC
-                LIMIT ?
-                OFFSET ?
-                """,
-                (status, int(limit), int(offset)),
-            ).fetchall()
-        else:
-            rows = cur.execute(
-                """
-                SELECT o.id, o.alert_id, a.ts AS alert_ts, o.symbol, o.horizon_minutes,
-                       a.entry_price, o.due_ts, o.resolved_ts, o.observed_price, o.return_pct, o.status,
-                       a.llm_allowed, a.llm_regime, a.llm_risk_level, a.llm_confidence, a.llm_note, a.llm_reason
-                FROM outcomes o
-                JOIN alerts a ON a.id = o.alert_id
-                ORDER BY o.id DESC
-                LIMIT ?
-                OFFSET ?
-                """,
-                (int(limit), int(offset)),
-            ).fetchall()
+            where.append("o.status = ?")
+            params.append(status)
+        if symbol:
+            where.append("o.symbol = ?")
+            params.append(str(symbol).upper())
+        if llm_allowed in {0, 1}:
+            where.append("a.llm_allowed = ?")
+            params.append(int(llm_allowed))
+        elif llm_allowed == -1:
+            where.append("a.llm_allowed IS NULL")
+        if ts_from:
+            where.append("a.ts >= ?")
+            params.append(str(ts_from))
+        if ts_to:
+            where.append("a.ts < ?")
+            params.append(str(ts_to))
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        cur = self.conn.cursor()
+        rows = cur.execute(
+            f"""
+            SELECT o.id, o.alert_id, a.ts AS alert_ts, o.symbol, o.horizon_minutes,
+                   a.entry_price, o.due_ts, o.resolved_ts, o.observed_price, o.return_pct, o.status,
+                   a.llm_allowed, a.llm_regime, a.llm_risk_level, a.llm_confidence, a.llm_note, a.llm_reason
+            FROM outcomes o
+            JOIN alerts a ON a.id = o.alert_id
+            {where_sql}
+            ORDER BY o.id DESC
+            LIMIT ?
+            OFFSET ?
+            """,
+            (*params, int(limit), int(offset)),
+        ).fetchall()
 
         return [dict(row) for row in rows]
 
-    def fetch_recent_llm_shadow_evals(self, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
+    def count_outcomes(
+        self,
+        status: str | None = None,
+        symbol: str | None = None,
+        llm_allowed: int | None = None,
+        ts_from: str | None = None,
+        ts_to: str | None = None,
+    ) -> int:
+        where: list[str] = []
+        params: list[Any] = []
+        if status in {"pending", "resolved"}:
+            where.append("o.status = ?")
+            params.append(status)
+        if symbol:
+            where.append("o.symbol = ?")
+            params.append(str(symbol).upper())
+        if llm_allowed in {0, 1}:
+            where.append("a.llm_allowed = ?")
+            params.append(int(llm_allowed))
+        elif llm_allowed == -1:
+            where.append("a.llm_allowed IS NULL")
+        if ts_from:
+            where.append("a.ts >= ?")
+            params.append(str(ts_from))
+        if ts_to:
+            where.append("a.ts < ?")
+            params.append(str(ts_to))
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        cur = self.conn.cursor()
+        row = cur.execute(
+            f"""
+            SELECT COUNT(*) AS total
+            FROM outcomes o
+            JOIN alerts a ON a.id = o.alert_id
+            {where_sql}
+            """,
+            tuple(params),
+        ).fetchone()
+        return int(row["total"]) if row and row["total"] is not None else 0
+
+    def fetch_recent_llm_shadow_evals(
+        self,
+        limit: int = 200,
+        offset: int = 0,
+        symbol: str | None = None,
+        llm_allowed: int | None = None,
+        ts_from: str | None = None,
+        ts_to: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if symbol:
+            where.append("symbol = ?")
+            params.append(str(symbol).upper())
+        if llm_allowed in {0, 1}:
+            where.append("llm_allowed = ?")
+            params.append(int(llm_allowed))
+        elif llm_allowed == -1:
+            where.append("llm_allowed IS NULL")
+        if ts_from:
+            where.append("ts >= ?")
+            params.append(str(ts_from))
+        if ts_to:
+            where.append("ts < ?")
+            params.append(str(ts_to))
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         cur = self.conn.cursor()
         rows = cur.execute(
-            """
+            f"""
             SELECT id, ts, symbol, score, spread_pct, threshold_ok, cooldown_ok, eligible_alert,
                    llm_allowed, llm_regime, llm_risk_level, llm_confidence, llm_reason, llm_latency_ms
             FROM llm_shadow_evals
+            {where_sql}
             ORDER BY id DESC
             LIMIT ?
             OFFSET ?
             """,
-            (int(limit), int(offset)),
+            (*params, int(limit), int(offset)),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def count_llm_shadow_evals(
+        self,
+        symbol: str | None = None,
+        llm_allowed: int | None = None,
+        ts_from: str | None = None,
+        ts_to: str | None = None,
+    ) -> int:
+        where: list[str] = []
+        params: list[Any] = []
+        if symbol:
+            where.append("symbol = ?")
+            params.append(str(symbol).upper())
+        if llm_allowed in {0, 1}:
+            where.append("llm_allowed = ?")
+            params.append(int(llm_allowed))
+        elif llm_allowed == -1:
+            where.append("llm_allowed IS NULL")
+        if ts_from:
+            where.append("ts >= ?")
+            params.append(str(ts_from))
+        if ts_to:
+            where.append("ts < ?")
+            params.append(str(ts_to))
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        cur = self.conn.cursor()
+        row = cur.execute(
+            f"SELECT COUNT(*) AS total FROM llm_shadow_evals {where_sql}",
+            tuple(params),
+        ).fetchone()
+        return int(row["total"]) if row and row["total"] is not None else 0
 
     def fetch_horizon_summary(self) -> list[dict[str, Any]]:
         cur = self.conn.cursor()
         rows = cur.execute(
             """
             SELECT
-              horizon_minutes,
+              o.horizon_minutes,
               COUNT(*) AS total,
-              SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END) AS resolved,
-              AVG(CASE WHEN status='resolved' THEN return_pct END) AS avg_return_pct,
-              AVG(CASE WHEN status='resolved' AND return_pct > 0 THEN 1.0 ELSE 0.0 END) AS win_rate
-            FROM outcomes
-            GROUP BY horizon_minutes
-            ORDER BY horizon_minutes ASC
+              SUM(CASE WHEN o.status='resolved' THEN 1 ELSE 0 END) AS resolved,
+              AVG(CASE WHEN o.status='resolved' THEN o.return_pct END) AS avg_return_pct,
+              AVG(
+                CASE
+                  WHEN o.status='resolved' THEN CASE WHEN o.return_pct > 0 THEN 1.0 ELSE 0.0 END
+                END
+              ) AS win_rate
+            FROM outcomes o
+            JOIN alerts a ON a.id = o.alert_id
+            GROUP BY o.horizon_minutes
+            ORDER BY o.horizon_minutes ASC
             """
         ).fetchall()
 

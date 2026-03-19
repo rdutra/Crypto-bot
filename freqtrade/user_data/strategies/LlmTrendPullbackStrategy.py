@@ -1,7 +1,8 @@
 import json
 import logging
 import os
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Set, Tuple
 
 import numpy as np
@@ -86,6 +87,13 @@ class LlmTrendPullbackStrategy(IStrategy):
 
     _llm_cache: Dict[str, Tuple[bool, str]] = {}
     _entry_rank_log_key: Optional[str] = None
+    _entry_diag_log_keys: Dict[str, str] = {}
+    _runtime_policy_cache: Dict[str, Any] = {}
+    _runtime_policy_last_load: float = 0.0
+    _runtime_policy_mtime: float = -1.0
+    _runtime_policy_log_key: Optional[str] = None
+    _daily_guard_cache: Dict[str, Any] = {}
+    _daily_guard_log_key: Optional[str] = None
 
     def _is_aggressive(self) -> bool:
         return STRATEGY_MODE == "aggressive"
@@ -207,11 +215,263 @@ class LlmTrendPullbackStrategy(IStrategy):
             value = default
         return max(min_value, min(max_value, value))
 
+    def _runtime_policy_enabled(self) -> bool:
+        return _env_bool("RUNTIME_POLICY_ENABLED", False)
+
+    def _runtime_policy_path(self) -> str:
+        value = os.getenv("RUNTIME_POLICY_PATH", "/freqtrade/user_data/logs/llm-runtime-policy.json").strip()
+        return value or "/freqtrade/user_data/logs/llm-runtime-policy.json"
+
+    def _runtime_policy_refresh_seconds(self) -> float:
+        return self._float_env("RUNTIME_POLICY_REFRESH_SECONDS", 30.0, 5.0, 300.0)
+
+    def _runtime_policy(self) -> Dict[str, Any]:
+        if not self._runtime_policy_enabled():
+            return {}
+
+        now = time.time()
+        refresh_seconds = self._runtime_policy_refresh_seconds()
+        if self._runtime_policy_cache and (now - self._runtime_policy_last_load) < refresh_seconds:
+            return self._runtime_policy_cache
+
+        self._runtime_policy_last_load = now
+        path = self._runtime_policy_path()
+
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            self._runtime_policy_cache = {}
+            self._runtime_policy_mtime = -1.0
+            return {}
+
+        if self._runtime_policy_cache and mtime == self._runtime_policy_mtime:
+            return self._runtime_policy_cache
+
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+        except Exception:
+            self._runtime_policy_cache = {}
+            self._runtime_policy_mtime = mtime
+            return {}
+
+        if not isinstance(raw, dict):
+            self._runtime_policy_cache = {}
+            self._runtime_policy_mtime = mtime
+            return {}
+
+        normalized: Dict[str, Any] = {}
+        profile = str(raw.get("profile", "")).strip().lower()
+        if profile in {"defensive", "normal", "offensive"}:
+            normalized["profile"] = profile
+
+        strictness = str(raw.get("aggr_entry_strictness", "")).strip().lower()
+        if strictness in {"strict", "normal"}:
+            normalized["aggr_entry_strictness"] = strictness
+
+        risk_stake = raw.get("risk_stake_multiplier")
+        try:
+            risk_stake_value = float(risk_stake)
+            normalized["risk_stake_multiplier"] = max(0.1, min(1.0, risk_stake_value))
+        except (TypeError, ValueError):
+            pass
+
+        risk_open = raw.get("risk_max_open_trades")
+        try:
+            risk_open_value = int(risk_open)
+            normalized["risk_max_open_trades"] = max(1, min(5, risk_open_value))
+        except (TypeError, ValueError):
+            pass
+
+        source = str(raw.get("source", "")).strip().lower()
+        reason = str(raw.get("reason", "")).strip()
+        note = str(raw.get("note", "")).strip()
+        confidence = raw.get("confidence")
+        try:
+            confidence_value = float(confidence)
+        except (TypeError, ValueError):
+            confidence_value = None
+        if confidence_value is not None:
+            normalized["confidence"] = max(0.0, min(1.0, confidence_value))
+        if source:
+            normalized["source"] = source
+        if reason:
+            normalized["reason"] = reason[:120]
+        if note:
+            normalized["note"] = note[:160]
+
+        self._runtime_policy_cache = normalized
+        self._runtime_policy_mtime = mtime
+
+        log_key = (
+            f"{normalized.get('profile', '')}:"
+            f"{normalized.get('aggr_entry_strictness', '')}:"
+            f"{normalized.get('risk_stake_multiplier', '')}:"
+            f"{normalized.get('risk_max_open_trades', '')}:"
+            f"{normalized.get('source', '')}:"
+            f"{normalized.get('reason', '')}"
+        )
+        if log_key and log_key != self._runtime_policy_log_key:
+            self._runtime_policy_log_key = log_key
+            LOGGER.info(
+                "Runtime policy active profile=%s strictness=%s risk_stake=%.2f risk_max_open=%s source=%s reason=%s note=%s",
+                normalized.get("profile", "n/a"),
+                normalized.get("aggr_entry_strictness", "n/a"),
+                float(normalized.get("risk_stake_multiplier", 0.0)),
+                normalized.get("risk_max_open_trades", "n/a"),
+                normalized.get("source", "n/a"),
+                normalized.get("reason", ""),
+                normalized.get("note", ""),
+            )
+
+        return normalized
+
     def _risk_stake_multiplier(self) -> float:
-        return self._float_env("RISK_STAKE_MULTIPLIER", 0.5, 0.1, 1.0)
+        base = self._float_env("RISK_STAKE_MULTIPLIER", 0.5, 0.1, 1.0)
+        policy = self._runtime_policy()
+        override = policy.get("risk_stake_multiplier")
+        try:
+            return max(0.1, min(1.0, float(override)))
+        except (TypeError, ValueError):
+            return base
 
     def _risk_max_open_trades(self) -> int:
-        return self._int_env("RISK_MAX_OPEN_TRADES", 1, 1, 5)
+        base = self._int_env("RISK_MAX_OPEN_TRADES", 1, 1, 5)
+        policy = self._runtime_policy()
+        override = policy.get("risk_max_open_trades")
+        try:
+            return max(1, min(5, int(override)))
+        except (TypeError, ValueError):
+            return base
+
+    def _daily_guard_enabled(self) -> bool:
+        return _env_bool("DAILY_GUARD_ENABLED", True)
+
+    def _daily_target_pct(self) -> float:
+        return self._float_env("DAILY_TARGET_PCT", 1.0, 0.1, 10.0)
+
+    def _daily_max_drawdown_pct(self) -> float:
+        return self._float_env("DAILY_MAX_DRAWDOWN_PCT", -1.5, -20.0, -0.1)
+
+    def _daily_pnl_base_capital(self) -> float:
+        config = getattr(self, "config", {}) or {}
+        default_base = 0.0
+        for key in ("available_capital", "dry_run_wallet"):
+            try:
+                value = float(config.get(key, 0.0))
+                if value > 0:
+                    default_base = value
+                    break
+            except (TypeError, ValueError):
+                continue
+        if default_base <= 0.0:
+            default_base = 200.0
+        return self._float_env("DAILY_PNL_BASE_CAPITAL", default_base, 20.0, 1000000.0)
+
+    def _as_utc_timestamp(self, value: Optional[datetime]) -> Optional[float]:
+        if value is None:
+            return None
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        else:
+            value = value.astimezone(timezone.utc)
+        return value.timestamp()
+
+    def _trade_close_datetime(self, trade: Any) -> Optional[datetime]:
+        close_dt = getattr(trade, "close_date_utc", None)
+        if close_dt is None:
+            close_dt = getattr(trade, "close_date", None)
+        return close_dt if isinstance(close_dt, datetime) else None
+
+    def _daily_realized_profit_pct(self, current_time: datetime) -> float:
+        now_ts = self._as_utc_timestamp(current_time)
+        if now_ts is None:
+            return 0.0
+        day_start_ts = datetime.fromtimestamp(now_ts, tz=timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).timestamp()
+
+        closed_trades = []
+        try:
+            if hasattr(Trade, "get_trades_proxy"):
+                closed_trades = Trade.get_trades_proxy(is_open=False)
+        except Exception:
+            closed_trades = []
+
+        daily_profit_abs = 0.0
+        for trade in closed_trades:
+            close_ts = self._as_utc_timestamp(self._trade_close_datetime(trade))
+            if close_ts is None or close_ts < day_start_ts:
+                continue
+
+            close_profit_abs = getattr(trade, "close_profit_abs", None)
+            try:
+                if close_profit_abs is None:
+                    close_profit_abs = float(getattr(trade, "stake_amount", 0.0)) * float(
+                        getattr(trade, "close_profit", 0.0)
+                    )
+                daily_profit_abs += float(close_profit_abs)
+            except (TypeError, ValueError):
+                continue
+
+        base = self._daily_pnl_base_capital()
+        return (daily_profit_abs / base) * 100.0 if base > 0 else 0.0
+
+    def _daily_guard_status(self, current_time: datetime) -> Tuple[bool, str, float]:
+        if not self._daily_guard_enabled():
+            return True, "disabled", 0.0
+
+        now_ts = self._as_utc_timestamp(current_time)
+        if now_ts is None:
+            return True, "time_unavailable", 0.0
+        day_key = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+
+        cached_day = str(self._daily_guard_cache.get("day", ""))
+        cached_ts = float(self._daily_guard_cache.get("ts", 0.0) or 0.0)
+        if cached_day == day_key and (now_ts - cached_ts) < 30.0:
+            return (
+                bool(self._daily_guard_cache.get("allow", True)),
+                str(self._daily_guard_cache.get("reason", "ok")),
+                float(self._daily_guard_cache.get("realized_pct", 0.0)),
+            )
+
+        realized_pct = self._daily_realized_profit_pct(current_time)
+        target_pct = self._daily_target_pct()
+        max_drawdown_pct = self._daily_max_drawdown_pct()
+
+        allow_entries = True
+        reason = "ok"
+        if realized_pct >= target_pct:
+            allow_entries = False
+            reason = "daily_target_reached"
+        elif realized_pct <= max_drawdown_pct:
+            allow_entries = False
+            reason = "daily_loss_limit"
+
+        self._daily_guard_cache = {
+            "day": day_key,
+            "ts": now_ts,
+            "allow": allow_entries,
+            "reason": reason,
+            "realized_pct": realized_pct,
+        }
+
+        log_key = f"{day_key}:{int(allow_entries)}:{reason}"
+        if log_key != self._daily_guard_log_key:
+            self._daily_guard_log_key = log_key
+            LOGGER.info(
+                "Daily guard date=%s realized=%.2f%% target=%.2f%% max_loss=%.2f%% allow_entries=%s reason=%s",
+                day_key,
+                realized_pct,
+                target_pct,
+                max_drawdown_pct,
+                allow_entries,
+                reason,
+            )
+
+        return allow_entries, reason, realized_pct
 
     def _entry_ranking_enabled(self) -> bool:
         return _env_bool("ENTRY_RANKING_ENABLED", self._is_aggressive())
@@ -219,7 +479,18 @@ class LlmTrendPullbackStrategy(IStrategy):
     def _aggr_entry_strictness(self) -> str:
         value = os.getenv("AGGR_ENTRY_STRICTNESS", "strict").strip().lower()
         if value not in {"normal", "strict"}:
+            value = "strict"
+
+        policy = self._runtime_policy()
+        override = str(policy.get("aggr_entry_strictness", "")).strip().lower()
+        if override in {"normal", "strict"}:
+            return override
+
+        profile = str(policy.get("profile", "")).strip().lower()
+        if profile == "defensive":
             return "strict"
+        if profile == "offensive":
+            return "normal"
         return value
 
     def _aggr_entry_is_strict(self) -> bool:
@@ -265,8 +536,8 @@ class LlmTrendPullbackStrategy(IStrategy):
         return self._float_env("CUSTOM_SL_MIN", default, -0.2, -0.01)
 
     def _custom_sl_max(self) -> float:
-        default = -0.015
-        return self._float_env("CUSTOM_SL_MAX", default, -0.1, -0.005)
+        default = -0.007 if self._is_aggressive() else -0.009
+        return self._float_env("CUSTOM_SL_MAX", default, -0.1, -0.001)
 
     def _is_live_like(self) -> bool:
         runmode = getattr(getattr(self, "dp", None), "runmode", None)
@@ -275,6 +546,67 @@ class LlmTrendPullbackStrategy(IStrategy):
 
     def _entry_ranking_log_enabled(self) -> bool:
         return _env_bool("ENTRY_RANKING_LOG", self._is_live_like())
+
+    def _entry_debug_log_enabled(self) -> bool:
+        return _env_bool("ENTRY_DEBUG_LOG", self._is_live_like())
+
+    def _log_entry_diagnostics(
+        self,
+        dataframe: DataFrame,
+        pair: str,
+        checks: Dict[str, Any],
+        thresholds: Dict[str, float],
+        base_allowed: bool,
+        final_allowed: bool,
+        tag: Optional[str],
+    ) -> None:
+        if not self._entry_debug_log_enabled() or dataframe.empty:
+            return
+
+        idx = dataframe.index[-1]
+        row = dataframe.loc[idx]
+        candle_date = row.get("date")
+        candle_label = candle_date.isoformat() if hasattr(candle_date, "isoformat") else str(candle_date)
+
+        failed_checks = []
+        for name, condition in checks.items():
+            try:
+                passed = bool(condition.iloc[-1])
+            except Exception:
+                passed = False
+            if not passed:
+                failed_checks.append(name)
+
+        log_key = f"{candle_label}:{int(base_allowed)}:{int(final_allowed)}:{tag or ''}:{','.join(failed_checks)}"
+        if self._entry_diag_log_keys.get(pair) == log_key:
+            return
+        self._entry_diag_log_keys[pair] = log_key
+
+        LOGGER.info(
+            (
+                "Entry diag pair=%s candle=%s base_ok=%s final_ok=%s tag=%s failed=%s "
+                "rsi=%.2f adx=%.2f atr_pct=%.2f spread=%.3f vol_z=%.2f bench_risk_ok=%s "
+                "th_rsi=[%.1f,%.1f] th_adx_min=%.1f th_atr=[%.2f,%.2f] th_spread_min=%.3f"
+            ),
+            pair,
+            candle_label,
+            int(base_allowed),
+            int(final_allowed),
+            tag or "",
+            ",".join(failed_checks) if failed_checks else "none",
+            self._safe_float(row.get("rsi"), 0.0),
+            self._safe_float(row.get("adx"), 0.0),
+            self._safe_float(row.get("atr_pct"), 0.0),
+            self._safe_float(row.get("ema_spread_pct"), 0.0),
+            self._safe_float(row.get("volume_z"), 0.0),
+            int(self._safe_float(row.get("bench_risk_ok"), 0.0)),
+            thresholds.get("rsi_min", 0.0),
+            thresholds.get("rsi_max", 0.0),
+            thresholds.get("adx_min", 0.0),
+            thresholds.get("atr_min", 0.0),
+            thresholds.get("atr_max", 0.0),
+            thresholds.get("ema_spread_min", 0.0),
+        )
 
     def _safe_float(self, value: Any, default: float = 0.0) -> float:
         try:
@@ -755,6 +1087,7 @@ class LlmTrendPullbackStrategy(IStrategy):
             & (dataframe["close"] > dataframe["ema20"])
         )
 
+        entry_checks: Dict[str, Any] = {}
         if self._is_aggressive():
             strict_aggr = self._aggr_entry_is_strict()
             adx_or_spread_ok = (
@@ -775,48 +1108,55 @@ class LlmTrendPullbackStrategy(IStrategy):
                     ((dataframe[trend_col] == 1) & (dataframe["close"] > dataframe["ema200"] * 0.995))
                     | (dataframe["close"] > dataframe["ema200"] * 1.01)
                 )
-            deterministic_entry = (
-                (dataframe["close"] > dataframe["ema20"])
-                & (dataframe["ema20"] >= dataframe["ema50"] * 0.998)
-                & (dataframe["rsi"] >= thresholds["rsi_min"])
-                & (dataframe["rsi"] <= thresholds["rsi_max"])
-                & adx_or_spread_ok
-                & (dataframe["atr_pct"] >= thresholds["atr_min"])
-                & (dataframe["atr_pct"] <= thresholds["atr_max"])
-                & (dataframe["ema_spread_pct"] >= thresholds["ema_spread_min"])
-                & (dataframe["close"] <= dataframe["ema20"] * thresholds["ema20_overext"])
-                & (dataframe["close"] >= dataframe["ema50"] * thresholds["pullback_floor"])
-                & (dataframe["volume"] > dataframe["vol_ma20"] * thresholds["vol_mult_min"])
-                & (dataframe["volume_z"] > thresholds["vol_z_min"])
-                & trend_ok
-            )
+            entry_checks = {
+                "close_gt_ema20": dataframe["close"] > dataframe["ema20"],
+                "ema20_vs_ema50": dataframe["ema20"] >= dataframe["ema50"] * 0.998,
+                "rsi_min": dataframe["rsi"] >= thresholds["rsi_min"],
+                "rsi_max": dataframe["rsi"] <= thresholds["rsi_max"],
+                "adx_or_spread": adx_or_spread_ok,
+                "atr_min": dataframe["atr_pct"] >= thresholds["atr_min"],
+                "atr_max": dataframe["atr_pct"] <= thresholds["atr_max"],
+                "ema_spread_min": dataframe["ema_spread_pct"] >= thresholds["ema_spread_min"],
+                "ema20_not_overext": dataframe["close"] <= dataframe["ema20"] * thresholds["ema20_overext"],
+                "pullback_floor": dataframe["close"] >= dataframe["ema50"] * thresholds["pullback_floor"],
+                "volume_mult": dataframe["volume"] > dataframe["vol_ma20"] * thresholds["vol_mult_min"],
+                "volume_z_min": dataframe["volume_z"] > thresholds["vol_z_min"],
+                "trend_ok": trend_ok,
+            }
         else:
-            deterministic_entry = (
-                (dataframe["close"] > dataframe["ema200"])
-                & (dataframe["ema20"] > dataframe["ema50"])
-                & (dataframe["ema50"] > dataframe["ema200"])
-                & (dataframe[ema50_info_col] > dataframe[ema200_info_col] * informative_trend_ratio)
-                & (dataframe[trend_col] == 1)
-                & (dataframe["rsi"] >= thresholds["rsi_min"])
-                & (dataframe["rsi"] <= thresholds["rsi_max"])
-                & (dataframe["adx"] >= thresholds["adx_min"])
-                & (dataframe["atr_pct"] >= thresholds["atr_min"])
-                & (dataframe["atr_pct"] <= thresholds["atr_max"])
-                & (dataframe["ema_spread_pct"] >= thresholds["ema_spread_min"])
-                & (dataframe["close"] <= dataframe["ema20"] * thresholds["ema20_overext"])
-                & (dataframe["close"] >= dataframe["ema50"] * thresholds["pullback_floor"])
-                & (dataframe["volume"] > dataframe["vol_ma20"] * thresholds["vol_mult_min"])
-                & (dataframe["volume_z"] > thresholds["vol_z_min"])
-                & touched_pullback_zone
-                & rebound_confirmed
-            )
+            entry_checks = {
+                "close_gt_ema200": dataframe["close"] > dataframe["ema200"],
+                "ema20_gt_ema50": dataframe["ema20"] > dataframe["ema50"],
+                "ema50_gt_ema200": dataframe["ema50"] > dataframe["ema200"],
+                "info_trend_ratio": dataframe[ema50_info_col] > dataframe[ema200_info_col] * informative_trend_ratio,
+                "info_trend_flag": dataframe[trend_col] == 1,
+                "rsi_min": dataframe["rsi"] >= thresholds["rsi_min"],
+                "rsi_max": dataframe["rsi"] <= thresholds["rsi_max"],
+                "adx_min": dataframe["adx"] >= thresholds["adx_min"],
+                "atr_min": dataframe["atr_pct"] >= thresholds["atr_min"],
+                "atr_max": dataframe["atr_pct"] <= thresholds["atr_max"],
+                "ema_spread_min": dataframe["ema_spread_pct"] >= thresholds["ema_spread_min"],
+                "ema20_not_overext": dataframe["close"] <= dataframe["ema20"] * thresholds["ema20_overext"],
+                "pullback_floor": dataframe["close"] >= dataframe["ema50"] * thresholds["pullback_floor"],
+                "volume_mult": dataframe["volume"] > dataframe["vol_ma20"] * thresholds["vol_mult_min"],
+                "volume_z_min": dataframe["volume_z"] > thresholds["vol_z_min"],
+                "touched_pullback_zone": touched_pullback_zone,
+                "rebound_confirmed": rebound_confirmed,
+            }
+
+        deterministic_entry = dataframe["close"] > 0
+        for condition in entry_checks.values():
+            deterministic_entry = deterministic_entry & condition
 
         if self._is_risk_pair(metadata["pair"]) and self._benchmark_filter_for_risk():
-            deterministic_entry = deterministic_entry & (dataframe["bench_risk_ok"] == 1)
+            benchmark_risk_ok = dataframe["bench_risk_ok"] == 1
+            entry_checks["benchmark_risk_ok"] = benchmark_risk_ok
+            deterministic_entry = deterministic_entry & benchmark_risk_ok
 
         dataframe.loc[deterministic_entry, "enter_long"] = 1
         dataframe.loc[deterministic_entry, "enter_tag"] = "base_trend_pullback"
 
+        base_allowed = bool(deterministic_entry.iloc[-1]) if not dataframe.empty else False
         if self._llm_enabled() and not dataframe.empty:
             idx = dataframe.index[-1]
             if int(dataframe.at[idx, "enter_long"]) == 1:
@@ -826,6 +1166,20 @@ class LlmTrendPullbackStrategy(IStrategy):
                     dataframe.at[idx, "enter_tag"] = f"llm_block:{reason}"[:64]
                 else:
                     dataframe.at[idx, "enter_tag"] = f"llm_ok:{reason}"[:64]
+
+        if not dataframe.empty:
+            idx = dataframe.index[-1]
+            final_allowed = int(dataframe.at[idx, "enter_long"]) == 1
+            tag = dataframe.at[idx, "enter_tag"]
+            self._log_entry_diagnostics(
+                dataframe=dataframe,
+                pair=metadata["pair"],
+                checks=entry_checks,
+                thresholds=thresholds,
+                base_allowed=base_allowed,
+                final_allowed=final_allowed,
+                tag=str(tag) if tag is not None else None,
+            )
 
         return dataframe
 
@@ -898,13 +1252,17 @@ class LlmTrendPullbackStrategy(IStrategy):
 
             profit_stop: Optional[float] = None
             if current_profit >= 0.08:
-                profit_stop = -0.018
+                profit_stop = -0.012
             elif current_profit >= 0.05:
-                profit_stop = -0.024
+                profit_stop = -0.014
             elif current_profit >= 0.03:
-                profit_stop = -0.03
-            elif current_profit >= 0.015:
-                profit_stop = -0.04
+                profit_stop = -0.017
+            elif current_profit >= 0.02:
+                profit_stop = -0.02
+            elif current_profit >= 0.012:
+                profit_stop = -0.024
+            elif current_profit >= 0.008:
+                profit_stop = -0.028
 
             if profit_stop is not None:
                 # Risk pairs are tightened earlier; core pairs get slightly more room.
@@ -912,6 +1270,14 @@ class LlmTrendPullbackStrategy(IStrategy):
                     profit_stop += 0.004
                 elif is_core:
                     profit_stop -= 0.002
+
+                # Lock a meaningful part of the move earlier so green trades don't round-trip as often.
+                if current_profit >= 0.01 and above_ema20 and not adx_rolling_over:
+                    profit_stop = max(profit_stop, -0.018)
+                if current_profit >= 0.015 and (adx_rising or above_ema20):
+                    profit_stop = max(profit_stop, -0.014)
+                if current_profit >= 0.025 and above_ema20:
+                    profit_stop = max(profit_stop, -0.01)
 
                 # Profit protection based on trend-state transitions.
                 if current_profit >= 0.04:
@@ -922,10 +1288,10 @@ class LlmTrendPullbackStrategy(IStrategy):
                         # Momentum fading and losing EMA20: tighten faster.
                         profit_stop += 0.010
 
-                if below_ema20 and current_profit > 0.02:
-                    profit_stop = max(profit_stop, -0.028)
+                if below_ema20 and current_profit > 0.01:
+                    profit_stop = max(profit_stop, -0.018)
                 if below_ema50 and current_profit > 0.0:
-                    profit_stop = max(profit_stop, -0.02)
+                    profit_stop = max(profit_stop, -0.012)
 
                 # Volatility regime after entry proxy via ATR vs ATR mean.
                 if vol_spike and below_ema20:
@@ -939,7 +1305,7 @@ class LlmTrendPullbackStrategy(IStrategy):
 
         dynamic_sl = max(dynamic_sl, self._custom_sl_min())
         dynamic_sl = min(dynamic_sl, self._custom_sl_max())
-        return max(-0.2, min(-0.005, dynamic_sl))
+        return max(-0.2, min(-0.001, dynamic_sl))
 
     def custom_exit(
         self,
@@ -954,6 +1320,13 @@ class LlmTrendPullbackStrategy(IStrategy):
         open_dt = getattr(trade, "open_date_utc", None)
         if open_dt is None:
             return None
+
+        daily_allow, daily_reason, _ = self._daily_guard_status(current_time)
+        if not daily_allow:
+            if daily_reason == "daily_loss_limit":
+                return "daily_loss_cap_exit"
+            if daily_reason == "daily_target_reached":
+                return "daily_target_lock_exit"
 
         age_hours = (current_time - open_dt).total_seconds() / 3600.0
         if age_hours >= self._stale_max_hours() and current_profit < 0.02:
@@ -1016,6 +1389,12 @@ class LlmTrendPullbackStrategy(IStrategy):
         side: str,
         **kwargs,
     ) -> bool:
+        _ = (order_type, amount, rate, time_in_force, entry_tag, kwargs)
+        if side == "long":
+            daily_allow, _, _ = self._daily_guard_status(current_time)
+            if not daily_allow:
+                return False
+
         if self._entry_ranking_enabled() and side == "long":
             if not self._ranked_entry_allowed(pair, current_time):
                 return False

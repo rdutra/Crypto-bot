@@ -2,6 +2,14 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
+    environment:
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-2}
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-10m}
+    cpus: ${OLLAMA_CPU_LIMIT:-6}
+    mem_limit: ${OLLAMA_MEM_LIMIT:-10g}
+    mem_reservation: ${OLLAMA_MEM_RESERVATION:-6g}
+    shm_size: ${OLLAMA_SHM_SIZE:-1g}
     ports:
       - "11434:11434"
     volumes:
@@ -27,7 +35,32 @@ services:
     environment:
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
-      OLLAMA_TIMEOUT: 30
+      OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-90}
+      BINANCE_REST_BASE: ${BINANCE_REST_BASE:-https://api.binance.com}
+      LLM_DEBUG_ENABLED: ${LLM_DEBUG_ENABLED:-true}
+      LLM_DEBUG_MAX_ENTRIES: ${LLM_DEBUG_MAX_ENTRIES:-250}
+      LLM_DEBUG_PROMPT_MAX_CHARS: ${LLM_DEBUG_PROMPT_MAX_CHARS:-8000}
+      LLM_DEBUG_RESPONSE_MAX_CHARS: ${LLM_DEBUG_RESPONSE_MAX_CHARS:-8000}
+      LLM_DEBUG_DB_PATH: ${LLM_DEBUG_DB_PATH:-/app/data/llm-debug.sqlite}
+      LLM_DEBUG_DB_MAX_ROWS: ${LLM_DEBUG_DB_MAX_ROWS:-50000}
+      LLM_MARKET_RANK_SKILL_ENABLED: ${LLM_MARKET_RANK_SKILL_ENABLED:-false}
+      LLM_MARKET_RANK_BASE_URL: ${LLM_MARKET_RANK_BASE_URL:-https://web3.binance.com}
+      LLM_MARKET_RANK_TIMEOUT_SECONDS: ${LLM_MARKET_RANK_TIMEOUT_SECONDS:-6}
+      LLM_MARKET_RANK_CACHE_SECONDS: ${LLM_MARKET_RANK_CACHE_SECONDS:-300}
+      LLM_MARKET_RANK_MAX_TOKENS: ${LLM_MARKET_RANK_MAX_TOKENS:-120}
+      LLM_MARKET_RANK_PERIOD: ${LLM_MARKET_RANK_PERIOD:-50}
+      LLM_MARKET_RANK_QUOTE: ${LLM_MARKET_RANK_QUOTE:-USDT}
+      LLM_MARKET_RANK_CHAIN_ID: ${LLM_MARKET_RANK_CHAIN_ID:-}
+      LLM_MARKET_RANK_EXCLUDE_REGEX: ${LLM_MARKET_RANK_EXCLUDE_REGEX:-(UP|DOWN|BULL|BEAR|1000|[0-9][0-9][0-9]+L|[0-9][0-9][0-9]+S)}
+      LLM_TRADING_SIGNAL_SKILL_ENABLED: ${LLM_TRADING_SIGNAL_SKILL_ENABLED:-false}
+      LLM_TRADING_SIGNAL_BASE_URL: ${LLM_TRADING_SIGNAL_BASE_URL:-https://web3.binance.com}
+      LLM_TRADING_SIGNAL_TIMEOUT_SECONDS: ${LLM_TRADING_SIGNAL_TIMEOUT_SECONDS:-6}
+      LLM_TRADING_SIGNAL_CACHE_SECONDS: ${LLM_TRADING_SIGNAL_CACHE_SECONDS:-180}
+      LLM_TRADING_SIGNAL_MAX_ITEMS: ${LLM_TRADING_SIGNAL_MAX_ITEMS:-120}
+      LLM_TRADING_SIGNAL_QUOTE: ${LLM_TRADING_SIGNAL_QUOTE:-USDT}
+      LLM_TRADING_SIGNAL_MIN_SCORE: ${LLM_TRADING_SIGNAL_MIN_SCORE:-0.25}
+      LLM_TRADING_SIGNAL_ENDPOINTS: ${LLM_TRADING_SIGNAL_ENDPOINTS:-/friendly/gateway/v1/public/alpha-trade/market/signal/list,/friendly/gateway/v1/public/alpha-trade/trading-signal/list,/friendly/gateway/v1/public/alpha-trade/whitelist/trading-signal/list}
+      LLM_TRADING_SIGNAL_EXCLUDE_REGEX: ${LLM_TRADING_SIGNAL_EXCLUDE_REGEX:-(UP|DOWN|BULL|BEAR|1000|[0-9][0-9][0-9]+L|[0-9][0-9][0-9]+S)}
     ports:
       - "8000:8000"
     depends_on:
@@ -57,6 +90,9 @@ services:
       LLM_READ_TIMEOUT_SECONDS: ${LLM_READ_TIMEOUT_SECONDS:-15}
       LLM_FAIL_OPEN: ${LLM_FAIL_OPEN:-false}
       DISABLE_PROTECTIONS: ${DISABLE_PROTECTIONS:-false}
+      RUNTIME_POLICY_ENABLED: ${RUNTIME_POLICY_ENABLED:-false}
+      RUNTIME_POLICY_PATH: ${RUNTIME_POLICY_PATH:-/freqtrade/user_data/logs/llm-runtime-policy.json}
+      RUNTIME_POLICY_REFRESH_SECONDS: ${RUNTIME_POLICY_REFRESH_SECONDS:-30}
       STRATEGY_MODE: ${STRATEGY_MODE:-conservative}
       STRATEGY_MINIMAL_ROI_JSON: ${STRATEGY_MINIMAL_ROI_JSON:-}
       STRATEGY_STOPLOSS: ${STRATEGY_STOPLOSS:-}
@@ -124,11 +160,11 @@ services:
       SCHED_PRUNE_TIME: ${SCHED_PRUNE_TIME:-03:00}
       SCHED_PRUNE_WEEKDAY: ${SCHED_PRUNE_WEEKDAY:-0}
       SCHED_PRUNE_DAYS: ${SCHED_PRUNE_DAYS:-180}
+      SCHED_STATE_DIR: ${SCHED_STATE_DIR:-/freqtrade/user_data/logs/scheduler_state}
       TZ: ${TZ:-UTC}
     volumes:
       - ./freqtrade/user_data:/freqtrade/user_data
       - ./scripts:/workspace/scripts:ro
-      - scheduler_state:/freqtrade/scheduler_state
     entrypoint: ["/bin/sh", "/workspace/scripts/maintenance-loop.sh"]
 
   pair-rotator:
@@ -146,6 +182,28 @@ services:
       STRATEGY_MODE: ${STRATEGY_MODE:-aggressive}
       LLM_ROTATE_LOOP_INTERVAL_MINUTES: ${LLM_ROTATE_LOOP_INTERVAL_MINUTES:-60}
       LLM_ROTATE_LOOP_JITTER_SECONDS: ${LLM_ROTATE_LOOP_JITTER_SECONDS:-0}
+      LLM_ROTATE_AUTO_DISCOVER: ${LLM_ROTATE_AUTO_DISCOVER:-true}
+      LLM_ROTATE_DATA_SOURCE: ${LLM_ROTATE_DATA_SOURCE:-exchange}
+      LLM_ROTATE_EXCHANGE: ${LLM_ROTATE_EXCHANGE:-binance}
+      LLM_ROTATE_QUOTE: ${LLM_ROTATE_QUOTE:-USDT}
+      LLM_ROTATE_MAX_CANDIDATES: ${LLM_ROTATE_MAX_CANDIDATES:-20}
+      LLM_ROTATE_MIN_QUOTE_VOLUME: ${LLM_ROTATE_MIN_QUOTE_VOLUME:-20000000}
+      LLM_ROTATE_EXCLUDE_REGEX: ${LLM_ROTATE_EXCLUDE_REGEX:-}
+      LLM_ROTATE_USE_SPIKE_BIAS: ${LLM_ROTATE_USE_SPIKE_BIAS:-false}
+      LLM_ROTATE_SPIKE_DB_PATH: ${LLM_ROTATE_SPIKE_DB_PATH:-./freqtrade/user_data/logs/spike-scanner.sqlite}
+      LLM_ROTATE_SPIKE_LOOKBACK_HOURS: ${LLM_ROTATE_SPIKE_LOOKBACK_HOURS:-48}
+      LLM_ROTATE_SPIKE_TOP_N: ${LLM_ROTATE_SPIKE_TOP_N:-4}
+      LLM_ROTATE_SPIKE_MIN_SCORE: ${LLM_ROTATE_SPIKE_MIN_SCORE:-0.80}
+      LLM_ROTATE_SPIKE_REQUIRE_LLM_ALLOWED: ${LLM_ROTATE_SPIKE_REQUIRE_LLM_ALLOWED:-false}
+      LLM_ROTATE_USE_SMART_MONEY_BIAS: ${LLM_ROTATE_USE_SMART_MONEY_BIAS:-false}
+      LLM_ROTATE_SMART_MONEY_TOP_N: ${LLM_ROTATE_SMART_MONEY_TOP_N:-4}
+      LLM_ROTATE_SMART_MONEY_MIN_SCORE: ${LLM_ROTATE_SMART_MONEY_MIN_SCORE:-0.60}
+      LLM_ROTATE_SMART_MONEY_REQUIRE_BUY: ${LLM_ROTATE_SMART_MONEY_REQUIRE_BUY:-true}
+      LLM_ROTATE_SMART_MONEY_FORCE_REFRESH: ${LLM_ROTATE_SMART_MONEY_FORCE_REFRESH:-false}
+      LLM_ROTATE_SMART_MONEY_FORCE_SLOT: ${LLM_ROTATE_SMART_MONEY_FORCE_SLOT:-true}
+      BINANCE_REST_BASE: ${BINANCE_REST_BASE:-https://api.binance.com}
+      ROTATE_SKIP_BOOTSTRAP_SERVICES: "true"
+      ROTATE_DISABLE_LOCK: "true"
     volumes:
       - ./:/workspace
       - /var/run/docker.sock:/var/run/docker.sock
@@ -153,6 +211,34 @@ services:
       - /bin/sh
       - -lc
       - apk add --no-cache bash python3 py3-pip curl jq >/dev/null && exec bash ./scripts/rotate-risk-pairs-loop.sh --mode ${STRATEGY_MODE:-aggressive} --interval-minutes ${LLM_ROTATE_LOOP_INTERVAL_MINUTES:-60}
+
+  policy-pivot:
+    image: docker:cli
+    container_name: policy-pivot
+    restart: unless-stopped
+    depends_on:
+      bot-api:
+        condition: service_healthy
+      freqtrade:
+        condition: service_started
+    working_dir: /workspace
+    environment:
+      LLM_BOT_API_URL: http://bot-api:8000
+      LLM_POLICY_LOOP_ENABLED: ${LLM_POLICY_LOOP_ENABLED:-false}
+      LLM_POLICY_INTERVAL_MINUTES: ${LLM_POLICY_INTERVAL_MINUTES:-15}
+      LLM_POLICY_LOOKBACK_HOURS: ${LLM_POLICY_LOOKBACK_HOURS:-24}
+      LLM_POLICY_HTTP_TIMEOUT_SECONDS: ${LLM_POLICY_HTTP_TIMEOUT_SECONDS:-20}
+      LLM_POLICY_TRADES_DB: ${LLM_POLICY_TRADES_DB:-./freqtrade/user_data/tradesv3.sqlite}
+      LLM_POLICY_OUTPUT_PATH: ${LLM_POLICY_OUTPUT_PATH:-./freqtrade/user_data/logs/llm-runtime-policy.json}
+      LLM_POLICY_USE_SPIKE: ${LLM_POLICY_USE_SPIKE:-true}
+      LLM_POLICY_SPIKE_DB_PATH: ${LLM_POLICY_SPIKE_DB_PATH:-./freqtrade/user_data/logs/spike-scanner.sqlite}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./:/workspace
+    command:
+      - /bin/sh
+      - -lc
+      - apk add --no-cache python3 >/dev/null && exec python3 ./scripts/llm-policy-loop.py
 
   spike-scanner:
     build: ./spike-scanner
@@ -177,6 +263,9 @@ services:
       SPIKE_TOP_N_ALERTS: ${SPIKE_TOP_N_ALERTS:-5}
       SPIKE_MIN_SCORE: ${SPIKE_MIN_SCORE:-0.80}
       SPIKE_MAX_SPREAD_PCT: ${SPIKE_MAX_SPREAD_PCT:-0.30}
+      SPIKE_MIN_BREAKOUT_PCT: ${SPIKE_MIN_BREAKOUT_PCT:-0.003}
+      SPIKE_MIN_BUY_RATIO: ${SPIKE_MIN_BUY_RATIO:-0.60}
+      SPIKE_MIN_REL_QUOTE: ${SPIKE_MIN_REL_QUOTE:-8.0}
       SPIKE_ALERT_COOLDOWN_MINUTES: ${SPIKE_ALERT_COOLDOWN_MINUTES:-30}
       SPIKE_LOOP_SECONDS: ${SPIKE_LOOP_SECONDS:-5}
       SPIKE_LOG_PATH: ${SPIKE_LOG_PATH:-/data/spike-alerts.jsonl}
@@ -196,6 +285,12 @@ services:
       SPIKE_WEB_ENABLED: ${SPIKE_WEB_ENABLED:-true}
       SPIKE_WEB_HOST: ${SPIKE_WEB_HOST:-0.0.0.0}
       SPIKE_WEB_PORT: ${SPIKE_WEB_PORT:-8090}
+      SPIKE_LLM_DEBUG_TAB_ENABLED: ${SPIKE_LLM_DEBUG_TAB_ENABLED:-true}
+      SPIKE_LLM_DEBUG_BOT_API_URL: ${SPIKE_LLM_DEBUG_BOT_API_URL:-http://bot-api:8000}
+      SPIKE_LLM_DEBUG_TIMEOUT_SECONDS: ${SPIKE_LLM_DEBUG_TIMEOUT_SECONDS:-3}
+      SPIKE_LLM_DEBUG_FETCH_LIMIT: ${SPIKE_LLM_DEBUG_FETCH_LIMIT:-500}
+      FREQTRADE_LOG_PATH: ${FREQTRADE_LOG_PATH:-/data/freqtrade.log}
+      FREQTRADE_DIAG_MAX_LINES: ${FREQTRADE_DIAG_MAX_LINES:-200000}
       SPIKE_NOTIFY_ENABLED: ${SPIKE_NOTIFY_ENABLED:-true}
       SPIKE_NOTIFY_TIMEOUT_SECONDS: ${SPIKE_NOTIFY_TIMEOUT_SECONDS:-10}
       SPIKE_TELEGRAM_BOT_TOKEN: ${SPIKE_TELEGRAM_BOT_TOKEN:-}
@@ -210,4 +305,3 @@ services:
 
 volumes:
   ollama_data:
-  scheduler_state:

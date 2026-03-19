@@ -28,6 +28,7 @@ venv/
 # Logs/runtime
 *.log
 *.pid
+bot-api/data/
 
 # Freqtrade runtime artifacts
 freqtrade/user_data/config.json

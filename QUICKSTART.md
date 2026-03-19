@@ -6,8 +6,10 @@ This is a command-first guide to bring up the full stack and run it with common 
 
 ```bash
 cp freqtrade/user_data/config.json.example freqtrade/user_data/config.json
-cp .env.example .env
+cp .env.minimal.example .env
 ```
+
+Need all advanced knobs? Use `cp .env.example .env` instead.
 
 Fill required values in `.env`:
 
@@ -25,12 +27,25 @@ docker compose up -d --build ollama
 docker compose exec -T ollama ollama pull qwen3:8b
 ```
 
+Optional: tune Ollama resources in `.env` for faster responses, then recreate:
+
+```bash
+OLLAMA_CPU_LIMIT=6
+OLLAMA_MEM_LIMIT=10g
+OLLAMA_MEM_RESERVATION=6g
+OLLAMA_SHM_SIZE=1g
+OLLAMA_NUM_PARALLEL=2
+OLLAMA_MAX_LOADED_MODELS=1
+OLLAMA_KEEP_ALIVE=10m
+docker compose up -d --force-recreate ollama bot-api
+```
+
 ## 2) Start the full stack
 
 Core services (bot + API + maintenance + periodic pair rotation):
 
 ```bash
-docker compose up -d --build ollama bot-api freqtrade scheduler pair-rotator
+docker compose up -d --build ollama bot-api freqtrade scheduler pair-rotator policy-pivot
 ```
 
 Optional spike scanner + dashboard:
@@ -49,6 +64,7 @@ curl -s http://localhost:8000/healthz
 Notes:
 - `spike-scanner` only starts with `--profile scanner`.
 - `pair-rotator` may take extra time on first start while it installs runtime tools.
+- `policy-pivot` writes adaptive runtime policy to `freqtrade/user_data/logs/llm-runtime-policy.json`.
 
 ## 3) Start using helper scripts (recommended)
 
@@ -102,6 +118,7 @@ Live trading (only when `dry_run=false`):
 - `--restart`
 - `--mode conservative|aggressive`
 - `--sync-whitelist` / `--no-sync-whitelist`
+- Spike-scanner integration is env-driven: set `LLM_ROTATE_USE_SPIKE_BIAS=true` plus `LLM_ROTATE_SPIKE_*` vars in `.env`.
 
 `./scripts/rotate-risk-pairs-loop.sh`
 - `--interval-minutes <n>`
@@ -122,6 +139,7 @@ Live logs:
 ```bash
 docker compose logs -f --tail=200 freqtrade bot-api scheduler pair-rotator
 docker compose logs -f --tail=200 spike-scanner
+docker compose logs -f --tail=200 policy-pivot
 ```
 
 Restart trading bot after config/env changes:
@@ -144,4 +162,5 @@ docker compose --profile scanner down
 - Spike scanner dashboard: `http://localhost:8091`
 - Freqtrade log: `freqtrade/user_data/logs/freqtrade.log`
 - Rotation log: `freqtrade/user_data/logs/llm-pair-rotation.log`
+- Runtime policy: `freqtrade/user_data/logs/llm-runtime-policy.json`
 - Scanner DB: `freqtrade/user_data/logs/spike-scanner.sqlite`

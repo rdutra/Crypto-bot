@@ -2,7 +2,7 @@
 set -eu
 
 LOG_DIR="/freqtrade/user_data/logs"
-STATE_DIR="/freqtrade/scheduler_state"
+STATE_DIR="${SCHED_STATE_DIR:-/freqtrade/user_data/logs/scheduler_state}"
 DATA_DIR="/freqtrade/user_data/data"
 
 SCHED_DOWNLOAD_ENABLED="${SCHED_DOWNLOAD_ENABLED:-true}"

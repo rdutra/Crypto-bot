@@ -10,8 +10,10 @@ Need the shortest path to run everything? See `QUICKSTART.md`.
 
 ```bash
 cp freqtrade/user_data/config.json.example freqtrade/user_data/config.json
-cp .env.example .env
+cp .env.minimal.example .env
 ```
+
+If you want every tunable option, use `cp .env.example .env` instead.
 
 2. Fill required secrets in `.env`:
 
@@ -49,6 +51,19 @@ docker compose --profile scanner up -d --build spike-scanner
 
 ```bash
 docker compose exec -T ollama ollama pull qwen3:8b
+```
+
+Optional performance tuning for local Ollama (set in `.env`, then recreate `ollama`):
+
+```bash
+OLLAMA_CPU_LIMIT=6
+OLLAMA_MEM_LIMIT=10g
+OLLAMA_MEM_RESERVATION=6g
+OLLAMA_SHM_SIZE=1g
+OLLAMA_NUM_PARALLEL=2
+OLLAMA_MAX_LOADED_MODELS=1
+OLLAMA_KEEP_ALIVE=10m
+docker compose up -d --force-recreate ollama bot-api
 ```
 
 ## 2) Start Trading (Dry-Run)
@@ -139,6 +154,17 @@ Rotation logs are appended to:
 
 - `freqtrade/user_data/logs/llm-pair-rotation.log`
 
+Runtime policy pivot (adaptive risk posture, no bot restart required):
+
+```bash
+docker compose up -d --build policy-pivot
+docker compose logs -f --tail=200 policy-pivot
+```
+
+Policy output file used by strategy:
+
+- `freqtrade/user_data/logs/llm-runtime-policy.json`
+
 Inspect latest decisions:
 
 ```bash
@@ -179,7 +205,7 @@ Live + risk-pair rotation before startup:
 Freqtrade + scheduler logs:
 
 ```bash
-docker compose logs -f --tail=200 freqtrade scheduler
+docker compose logs -f --tail=200 freqtrade scheduler policy-pivot
 ```
 
 Wallet status / manual stop:
@@ -208,6 +234,9 @@ Dashboard:
 ```bash
 open http://localhost:8091
 ```
+
+The dashboard now includes a **Freqtrade Entry Diagnostics** section sourced from `freqtrade.log`, with the same pagination/filter behavior as the alert tables.
+Dashboard tables are now split into tabs (`Overview`, `Predictions`, `LLM Evals`, `Entry Diags`, `Outcomes`, `LLM Debug`) so large datasets stay manageable.
 
 Watch scanner logs:
 
@@ -245,6 +274,11 @@ Notes:
 - API endpoint `GET /api/outcomes?limit=300&status=resolved|pending`
 - API endpoint `GET /api/summary`
 - API endpoint `GET /api/llm-evals?limit=200` (recent LLM shadow evaluations by symbol)
+- API endpoint `GET /api/llm-debug?limit=200` (recent bot-api prompt/response debug feed shown in LLM Debug tab)
+- Bot API endpoint `GET /debug/llm-calls?limit=200` (prompt/response history persisted in sqlite)
+- Bot API endpoint `GET /skills/crypto-market-rank?limit=50` (Binance market-rank skill cache/preview)
+- Bot API endpoint `GET /skills/trading-signal?limit=50` (Binance trading-signal skill cache/preview)
+- Bot API endpoint `POST /rank-pairs` now returns `market_rank_source/errors` and `trading_signal_source/errors` for source/fallback visibility
 
 ## 8) Key `.env` Controls
 
@@ -255,7 +289,28 @@ Core strategy:
 - `LLM_MIN_CONFIDENCE=0.65`
 - `LLM_CONNECT_TIMEOUT_SECONDS=2`
 - `LLM_READ_TIMEOUT_SECONDS=45` recommended for slower local models like `qwen3:8b` (`15` is often too low)
+- `OLLAMA_TIMEOUT=90` for `bot-api` model calls (if too low, `/rank-pairs` can fail with `ollama_error`)
 - `LLM_FAIL_OPEN=true` recommended in live/dry-run to avoid blocking entries when LLM is temporarily unavailable
+- `LLM_DEBUG_ENABLED=true`, `LLM_DEBUG_MAX_ENTRIES=250` (in-memory hot cache)
+- `LLM_DEBUG_DB_PATH=/app/data/llm-debug.sqlite`, `LLM_DEBUG_DB_MAX_ROWS=50000` (persistent debug history in sqlite)
+- `LLM_MARKET_RANK_SKILL_ENABLED=true|false` (inject Binance market-rank context into `/rank-pairs` prompts)
+- `LLM_MARKET_RANK_BASE_URL=https://web3.binance.com`
+- `LLM_MARKET_RANK_TIMEOUT_SECONDS=6`, `LLM_MARKET_RANK_CACHE_SECONDS=300`
+- `LLM_MARKET_RANK_MAX_TOKENS=120`, `LLM_MARKET_RANK_PERIOD=50`, `LLM_MARKET_RANK_QUOTE=USDT`
+- `LLM_MARKET_RANK_UNIFIED_ENDPOINT=/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/unified/rank/list`
+- `LLM_MARKET_RANK_CHAIN_ID=` (optional chain filter; blank for all)
+- `LLM_MARKET_RANK_EXCLUDE_REGEX=...` (exclude leveraged symbols from rank context)
+- `LLM_TRADING_SIGNAL_SKILL_ENABLED=true|false` (inject trading-signal context into `/rank-pairs` prompts)
+- `LLM_TRADING_SIGNAL_BASE_URL=https://web3.binance.com`
+- `LLM_TRADING_SIGNAL_TIMEOUT_SECONDS=6`, `LLM_TRADING_SIGNAL_CACHE_SECONDS=180`
+- `LLM_TRADING_SIGNAL_MAX_ITEMS=120`, `LLM_TRADING_SIGNAL_QUOTE=USDT`
+- `LLM_TRADING_SIGNAL_MIN_SCORE=0.25`
+- `LLM_TRADING_SIGNAL_BUY_BONUS_MULT=0.9` (bonus weight for `buy` signals in ranking)
+- `LLM_TRADING_SIGNAL_SELL_PENALTY_MULT=0.0` (default off for long-only; set `>0` to penalize `sell`)
+- `LLM_TRADING_SIGNAL_CHAIN_ID=56` and `LLM_TRADING_SIGNAL_USER_AGENT=binance-web3/1.0 (Skill)`
+- `LLM_TRADING_SIGNAL_ENDPOINTS=...` (comma-separated endpoint paths to probe)
+- `LLM_TRADING_SIGNAL_EXCLUDE_REGEX=...`
+- `LLM_RANK_SINGLE_MAX_OLLAMA_FAILURES=2` (if single-call recovery keeps hitting Ollama errors, fall back to deterministic ranking early)
 - `CORE_PAIRS=...`
 - `RISK_PAIRS=...`
 - Keep `exchange.pair_whitelist` lean (usually `CORE_PAIRS + RISK_PAIRS`) to avoid slow analysis cycles and missed signals.
@@ -276,6 +331,9 @@ Core strategy:
 - `BENCHMARK_REDUCE_STAKE_WHEN_WEAK=true` with `BENCHMARK_RISK_STAKE_MULT_WHEN_WEAK=0.6` and `BENCHMARK_CORE_STAKE_MULT_WHEN_WEAK=0.85`
 - `ENTRY_RANKING_ENABLED=true`, `ENTRY_TOP_N=1`, `ENTRY_MIN_SCORE=0.58` (take only best candidates)
 - `ENTRY_RANKING_LOG=true|false` (defaults to on in live/dry-run, off in backtests)
+- `RUNTIME_POLICY_ENABLED=true|false` (read runtime policy JSON and adapt risk knobs on the fly)
+- `RUNTIME_POLICY_PATH=/freqtrade/user_data/logs/llm-runtime-policy.json`
+- `RUNTIME_POLICY_REFRESH_SECONDS=30`
 
 LLM rotation:
 
@@ -284,6 +342,7 @@ LLM rotation:
 - `LLM_ROTATE_EXCHANGE=binance`
 - `LLM_ROTATE_QUOTE=USDT`
 - `LLM_ROTATE_MAX_CANDIDATES=20`
+  - On CPU-only inference, `10-12` is usually more stable/faster than `20`.
 - `LLM_ROTATE_MIN_QUOTE_VOLUME=20000000`
 - `LLM_ROTATE_EXCLUDE_REGEX=(UP|DOWN|BULL|BEAR|1000|[0-9][0-9][0-9]+L|[0-9][0-9][0-9]+S)`
 - `LLM_ROTATE_TOP_N=3`
@@ -291,9 +350,32 @@ LLM rotation:
 - `LLM_ROTATE_ALLOWED_RISK=low medium`
 - `LLM_ROTATE_ALLOWED_REGIMES=trend_pullback` (aggressive default in script: `trend_pullback breakout mean_reversion`)
 - `LLM_ROTATE_SYNC_WHITELIST=true`
+- `LLM_ROTATE_USE_SPIKE_BIAS=true|false` (prepend recent high-score scanner symbols into rotation candidates)
+- `LLM_ROTATE_SPIKE_DB_PATH=./freqtrade/user_data/logs/spike-scanner.sqlite`
+- `LLM_ROTATE_SPIKE_LOOKBACK_HOURS=48`
+- `LLM_ROTATE_SPIKE_TOP_N=4`
+- `LLM_ROTATE_SPIKE_MIN_SCORE=0.80`
+- `LLM_ROTATE_SPIKE_REQUIRE_LLM_ALLOWED=false` (if true, only scanner rows where LLM allowed are used)
+- `LLM_ROTATE_USE_SMART_MONEY_BIAS=true|false` (prepend Binance smart-money candidates that are spot-tradable now)
+- `LLM_ROTATE_SMART_MONEY_TOP_N=4`
+- `LLM_ROTATE_SMART_MONEY_MIN_SCORE=0.60`
+- `LLM_ROTATE_SMART_MONEY_REQUIRE_BUY=true` (if true, only smart-money `buy` side candidates are used)
+- `LLM_ROTATE_SMART_MONEY_FORCE_REFRESH=false` (if true, bypass bot-api trading-signal cache on each rotation)
+- `LLM_ROTATE_SMART_MONEY_FORCE_SLOT=true` (if true, reserve at least one selected slot for the top smart-money candidate)
 - `LLM_ROTATE_LOG_PATH=./freqtrade/user_data/logs/llm-pair-rotation.log`
 - `LLM_ROTATE_LOOP_INTERVAL_MINUTES=60` (used by `rotate-risk-pairs-loop.sh`)
 - `LLM_ROTATE_LOOP_JITTER_SECONDS=0` (optional random delay before each cycle)
+
+LLM runtime policy loop:
+
+- `LLM_POLICY_LOOP_ENABLED=true|false`
+- `LLM_POLICY_INTERVAL_MINUTES=15`
+- `LLM_POLICY_LOOKBACK_HOURS=24`
+- `LLM_POLICY_HTTP_TIMEOUT_SECONDS=20`
+- `LLM_POLICY_TRADES_DB=./freqtrade/user_data/tradesv3.sqlite`
+- `LLM_POLICY_OUTPUT_PATH=./freqtrade/user_data/logs/llm-runtime-policy.json`
+- `LLM_POLICY_USE_SPIKE=true|false`
+- `LLM_POLICY_SPIKE_DB_PATH=./freqtrade/user_data/logs/spike-scanner.sqlite`
 
 Scheduler:
 
@@ -305,6 +387,7 @@ Scheduler:
 - `SCHED_PRUNE_TIME=03:00`
 - `SCHED_PRUNE_WEEKDAY=0`
 - `SCHED_PRUNE_DAYS=180`
+- `SCHED_STATE_DIR=/freqtrade/user_data/logs/scheduler_state`
 
 Spike scanner:
 
@@ -317,8 +400,11 @@ Spike scanner:
 - `SPIKE_EXCLUDE_SYMBOLS=BTCUSDT ETHUSDT`
 - `SPIKE_UNIVERSE_MAX_SYMBOLS=60`
 - `SPIKE_TOP_N_ALERTS=5`
-- `SPIKE_MIN_SCORE=0.80`
-- `SPIKE_MAX_SPREAD_PCT=0.30`
+- `SPIKE_MIN_SCORE=0.76`
+- `SPIKE_MAX_SPREAD_PCT=0.20`
+- `SPIKE_MIN_BREAKOUT_PCT=0.003` (requires fresh breakout confirmation)
+- `SPIKE_MIN_BUY_RATIO=0.60` (requires buy-pressure confirmation)
+- `SPIKE_MIN_REL_QUOTE=8.0` (requires minimum quote-flow expansion vs baseline)
 - `SPIKE_ALERT_COOLDOWN_MINUTES=30`
 - `SPIKE_LOOP_SECONDS=5`
 - `SPIKE_LOG_PATH=/data/spike-alerts.jsonl`
@@ -338,6 +424,12 @@ Spike scanner:
 - `SPIKE_WEB_ENABLED=true`
 - `SPIKE_WEB_HOST=0.0.0.0`
 - `SPIKE_WEB_PORT=8090` and `SPIKE_WEB_PUBLIC_PORT=8091`
+- `SPIKE_LLM_DEBUG_TAB_ENABLED=true` (show/hide LLM Debug tab)
+- `SPIKE_LLM_DEBUG_BOT_API_URL=http://bot-api:8000` (source of prompt/response feed)
+- `SPIKE_LLM_DEBUG_TIMEOUT_SECONDS=3`
+- `SPIKE_LLM_DEBUG_FETCH_LIMIT=500`
+- `FREQTRADE_LOG_PATH=/data/freqtrade.log` (source file for entry diagnostics in the scanner web UI)
+- `FREQTRADE_DIAG_MAX_LINES=200000` (how many log lines to scan when building diagnostics table)
 - `SPIKE_NOTIFY_ENABLED=true`
 - `SPIKE_NOTIFY_TIMEOUT_SECONDS=10`
 - `SPIKE_TELEGRAM_BOT_TOKEN=...` and `SPIKE_TELEGRAM_CHAT_ID=...` (or generic `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`)

@@ -29,7 +29,7 @@ async def scorer_loop(
 ) -> None:
     while True:
         ranked = []
-        scored_candidates: list[tuple[str, float, dict, float, bool, bool, bool, bool]] = []
+        scored_candidates: list[tuple[str, float, dict, float, bool, bool, bool, bool, bool, bool, bool]] = []
         current_ts = now_ts()
 
         for symbol, state in STATE.items():
@@ -46,9 +46,24 @@ async def scorer_loop(
             spread_ok = meta["spread_pct"] <= settings.max_spread_pct
             cooldown_ok = (current_ts - state.last_alert_ts) > (settings.cooldown_minutes * 60)
             threshold_ok = score >= settings.min_score
-            eligible_alert = threshold_ok and spread_ok and cooldown_ok
+            breakout_ok = float(meta.get("breakout", 0.0)) >= settings.min_breakout_pct
+            buy_ratio_ok = float(meta.get("buy_ratio", 0.0)) >= settings.min_buy_ratio
+            rel_quote_ok = float(meta.get("rel_quote", 0.0)) >= settings.min_rel_quote
+            eligible_alert = threshold_ok and spread_ok and cooldown_ok and breakout_ok and buy_ratio_ok and rel_quote_ok
             scored_candidates.append(
-                (symbol, score, meta, state.last_price, spread_ok, cooldown_ok, threshold_ok, eligible_alert)
+                (
+                    symbol,
+                    score,
+                    meta,
+                    state.last_price,
+                    spread_ok,
+                    cooldown_ok,
+                    threshold_ok,
+                    breakout_ok,
+                    buy_ratio_ok,
+                    rel_quote_ok,
+                    eligible_alert,
+                )
             )
 
             if eligible_alert:
@@ -61,7 +76,19 @@ async def scorer_loop(
             eval_pool = [
                 item for item in sorted(scored_candidates, key=lambda x: x[1], reverse=True) if float(item[1]) >= eval_min_score
             ][:eval_limit]
-            for symbol, score, meta, _last_price, spread_ok, cooldown_ok, threshold_ok, eligible_alert in eval_pool:
+            for (
+                symbol,
+                score,
+                meta,
+                _last_price,
+                spread_ok,
+                cooldown_ok,
+                threshold_ok,
+                breakout_ok,
+                buy_ratio_ok,
+                rel_quote_ok,
+                eligible_alert,
+            ) in eval_pool:
                 llm_result = await llm_shadow.evaluate(symbol=symbol, state=STATE[symbol], current_ts=current_ts)
                 llm_shadow_by_symbol[symbol] = llm_result
                 if not bool(llm_result.get("cached", False)):
@@ -74,6 +101,11 @@ async def scorer_loop(
                             "threshold_ok": bool(threshold_ok),
                             "cooldown_ok": bool(cooldown_ok),
                             "eligible_alert": bool(eligible_alert),
+                            "filters": {
+                                "breakout_ok": bool(breakout_ok),
+                                "buy_ratio_ok": bool(buy_ratio_ok),
+                                "rel_quote_ok": bool(rel_quote_ok),
+                            },
                             "llm_shadow": llm_result,
                         }
                     )
@@ -91,7 +123,14 @@ async def scorer_loop(
                 "symbol": symbol.upper(),
                 "score": round(score, 4),
                 "price": round(last_price, 8) if last_price > 0 else None,
-                "meta": meta,
+                "meta": {
+                    **meta,
+                    "th_score_min": settings.min_score,
+                    "th_spread_max": settings.max_spread_pct,
+                    "th_breakout_min": settings.min_breakout_pct,
+                    "th_buy_ratio_min": settings.min_buy_ratio,
+                    "th_rel_quote_min": settings.min_rel_quote,
+                },
             }
             if llm_shadow_result:
                 payload["llm_shadow"] = llm_shadow_result
@@ -159,7 +198,17 @@ async def main() -> None:
     )
     LOGGER.info("Top symbols sample: %s", ", ".join(s.upper() for s in symbols[:10]))
     LOGGER.info("Prediction DB: %s", settings.db_path)
+    if store.orphan_outcomes_pruned > 0:
+        LOGGER.info("Scanner DB cleanup: pruned orphan outcomes=%s", store.orphan_outcomes_pruned)
     LOGGER.info("Outcome horizons (min): %s", settings.parsed_outcome_horizons())
+    LOGGER.info(
+        "Alert gates: min_score=%.3f max_spread=%.3f min_breakout=%.4f min_buy_ratio=%.3f min_rel_quote=%.2f",
+        settings.min_score,
+        settings.max_spread_pct,
+        settings.min_breakout_pct,
+        settings.min_buy_ratio,
+        settings.min_rel_quote,
+    )
     if llm_shadow.enabled():
         LOGGER.info(
             "LLM shadow enabled: bot_api=%s min_conf=%.2f allowed_regimes=%s allowed_risk=%s",
