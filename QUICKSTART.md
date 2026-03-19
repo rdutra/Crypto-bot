@@ -24,7 +24,7 @@ Pull the model:
 
 ```bash
 docker compose up -d --build ollama
-docker compose exec -T ollama ollama pull qwen3:8b
+docker compose exec -T ollama ollama pull llama3.1:8b
 ```
 
 Optional: tune Ollama resources in `.env` for faster responses, then recreate:
@@ -42,16 +42,10 @@ docker compose up -d --force-recreate ollama bot-api
 
 ## 2) Start the full stack
 
-Core services (bot + API + maintenance + periodic pair rotation):
+Core services (bot + API + maintenance + periodic pair rotation + spike scanner):
 
 ```bash
-docker compose up -d --build ollama bot-api freqtrade scheduler pair-rotator policy-pivot
-```
-
-Optional spike scanner + dashboard:
-
-```bash
-docker compose --profile scanner up -d --build spike-scanner
+docker compose up -d --build ollama bot-api spike-scanner freqtrade scheduler pair-rotator policy-pivot
 ```
 
 Check status:
@@ -62,7 +56,8 @@ curl -s http://localhost:8000/healthz
 ```
 
 Notes:
-- `spike-scanner` only starts with `--profile scanner`.
+- `spike-scanner` starts with the default stack.
+- Scanner health: `http://localhost:8091/healthz`
 - `pair-rotator` may take extra time on first start while it installs runtime tools.
 - `policy-pivot` writes adaptive runtime policy to `freqtrade/user_data/logs/llm-runtime-policy.json`.
 
@@ -145,14 +140,13 @@ docker compose logs -f --tail=200 policy-pivot
 Restart trading bot after config/env changes:
 
 ```bash
-docker compose up -d --force-recreate freqtrade
+docker compose up -d --force-recreate freqtrade scheduler pair-rotator policy-pivot
 ```
 
 Stop everything:
 
 ```bash
 docker compose down
-docker compose --profile scanner down
 ```
 
 ## 6) Useful endpoints/files

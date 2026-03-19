@@ -74,7 +74,9 @@ async def scorer_loop(
             eval_limit = max(settings.top_n_alerts, max(1, settings.llm_shadow_eval_top_n))
             eval_min_score = float(settings.llm_shadow_eval_min_score)
             eval_pool = [
-                item for item in sorted(scored_candidates, key=lambda x: x[1], reverse=True) if float(item[1]) >= eval_min_score
+                item
+                for item in sorted(scored_candidates, key=lambda x: x[1], reverse=True)
+                if bool(item[10]) and float(item[1]) >= eval_min_score
             ][:eval_limit]
             for (
                 symbol,

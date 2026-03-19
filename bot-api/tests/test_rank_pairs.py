@@ -64,7 +64,7 @@ class TradingSignalParsingTests(unittest.TestCase):
 
 
 class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_rank_pairs_returns_skill_meta_without_sell_penalty_by_default(self) -> None:
+    async def test_rank_pairs_returns_extended_skill_meta_without_sell_penalty_by_default(self) -> None:
         req = bot_main.RankPairsRequest(candidates=[_sample_candidate()])
 
         async def fake_run_ollama(_: str) -> str:
@@ -83,10 +83,22 @@ class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
             )
 
         async def fake_market_rank_context(force_refresh: bool = False):  # noqa: ARG001
-            return {}, {"source": "binance_spot_fallback", "errors": ["using_spot_fallback"]}
+            return {}, {
+                "provider": "official_skill",
+                "source": "official_skill:/skills/crypto-market-rank",
+                "upstream_source": "/skills/crypto-market-rank",
+                "errors": ["using_cached_payload"],
+                "upstream_errors": ["using_cached_payload"],
+            }
 
         async def fake_trading_signal_context(force_refresh: bool = False):  # noqa: ARG001
-            return {"BTC/USDT": {"side": "sell", "score": 1.0}}, {"source": "binance_web3:path", "errors": []}
+            return {"BTC/USDT": {"side": "sell", "score": 1.0}}, {
+                "provider": "direct",
+                "source": "binance_web3:path",
+                "upstream_source": "binance_web3:path",
+                "errors": [],
+                "upstream_errors": [],
+            }
 
         original_run_ollama = bot_main._run_ollama
         original_market_loader = bot_main._load_market_rank_context
@@ -112,12 +124,56 @@ class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
             bot_main.TRADING_SIGNAL_SKILL_ENABLED = original_signal_enabled
             bot_main.TRADING_SIGNAL_SELL_PENALTY_MULT = original_sell_penalty
 
-        self.assertEqual(response.market_rank_source, "binance_spot_fallback")
-        self.assertEqual(response.market_rank_errors, ["using_spot_fallback"])
+        self.assertEqual(response.market_rank_source, "official_skill:/skills/crypto-market-rank")
+        self.assertEqual(response.market_rank_provider, "official_skill")
+        self.assertEqual(response.market_rank_upstream_source, "/skills/crypto-market-rank")
+        self.assertEqual(response.market_rank_upstream_errors, ["using_cached_payload"])
         self.assertEqual(response.trading_signal_source, "binance_web3:path")
+        self.assertEqual(response.trading_signal_provider, "direct")
         self.assertEqual(response.trading_signal_errors, [])
         self.assertEqual(len(response.decisions), 1)
         self.assertAlmostEqual(response.decisions[0].final_score, 8.4, places=6)
+
+    async def test_query_token_info_returns_normalized_response(self) -> None:
+        async def fake_loader(**kwargs):
+            self.assertEqual(kwargs["symbol"], "CAKE")
+            return [
+                {
+                    "symbol": "CAKE",
+                    "name": "PancakeSwap",
+                    "chain": "56",
+                    "contract_address": "0xabc",
+                    "price": 2.1,
+                    "change_24h_pct": 0.12,
+                    "volume_24h_usd": 12345.0,
+                    "liquidity_usd": 99999.0,
+                    "market_cap_usd": 456789.0,
+                    "holders": 1234,
+                    "top10_holder_share": 0.42,
+                    "is_binance_spot_tradable": True,
+                }
+            ], {"provider": "official_skill", "source": "official_skill", "upstream_source": "/skills/query-token-info", "errors": [], "upstream_errors": []}
+
+        original_loader = bot_main._load_token_info_items
+        original_enabled = bot_main.TOKEN_INFO_SKILL_ENABLED
+        try:
+            bot_main._load_token_info_items = fake_loader
+            bot_main.TOKEN_INFO_SKILL_ENABLED = True
+            response = await bot_main.query_token_info(symbol="CAKE")
+        finally:
+            bot_main._load_token_info_items = original_loader
+            bot_main.TOKEN_INFO_SKILL_ENABLED = original_enabled
+
+        self.assertTrue(response.enabled)
+        self.assertEqual(response.provider, "official_skill")
+        self.assertEqual(response.count, 1)
+        self.assertEqual(response.items[0]["symbol"], "CAKE")
+        self.assertTrue(response.items[0]["is_binance_spot_tradable"])
+
+    async def test_query_address_info_requires_address(self) -> None:
+        with self.assertRaises(bot_main.HTTPException) as ctx:
+            await bot_main.query_address_info(address="")
+        self.assertEqual(ctx.exception.status_code, 400)
 
 
 if __name__ == "__main__":

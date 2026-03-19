@@ -121,7 +121,7 @@ trap 'exit 130' INT TERM
 echo "Starting live run in ${MODE} mode..."
 if [[ "${ROTATE_RISK_PAIRS}" == "true" ]]; then
   echo "Rotating risk pairs (LLM advisor)..."
-  docker compose up -d ollama bot-api >/dev/null
+  docker compose up -d ollama bot-api spike-scanner >/dev/null
   if ./scripts/rotate-risk-pairs.sh --apply --mode "${MODE}"; then
     rotate_log="${LLM_ROTATE_LOG_PATH:-./freqtrade/user_data/logs/llm-pair-rotation.log}"
     if [[ "${rotate_log}" != /* ]]; then
@@ -150,7 +150,7 @@ PY
     echo "Risk-pair rotation failed; continuing with current RISK_PAIRS."
   fi
 fi
-STRATEGY_MODE="${MODE}" docker compose up -d ollama bot-api scheduler freqtrade
+STRATEGY_MODE="${MODE}" docker compose up -d ollama bot-api spike-scanner scheduler pair-rotator policy-pivot freqtrade
 
 wallet_cmd=(./scripts/wallet-control.sh --watch "${WATCH_SECONDS}")
 if [[ -n "${STOP_BELOW}" ]]; then

@@ -129,6 +129,102 @@ def _collect_spike_rate(db_path: Path, lookback_hours: float) -> Optional[float]
     return max(0.0, min(1.0, allowed / total))
 
 
+def _collect_rotation_metrics(log_path: Path, lookback_hours: float) -> Optional[dict[str, Any]]:
+    if not log_path.exists():
+        return None
+
+    cutoff = _utc_now() - timedelta(hours=lookback_hours)
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return None
+
+    for raw in reversed(lines[-200:]):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        event = str(payload.get("event", "")).strip()
+        if event not in {"rotation_decision", "rotation_no_candidates"}:
+            continue
+
+        ts_raw = str(payload.get("timestamp", "")).strip()
+        if ts_raw:
+            try:
+                ts = datetime.fromisoformat(ts_raw)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                else:
+                    ts = ts.astimezone(timezone.utc)
+                if ts < cutoff:
+                    continue
+            except ValueError:
+                pass
+
+        decisions = payload.get("decisions", [])
+        if not isinstance(decisions, list):
+            decisions = []
+        selected_pairs = {
+            str(item).strip().upper()
+            for item in payload.get("selected_pairs", [])
+            if str(item).strip()
+        }
+        prefilter_rejected = payload.get("prefilter_rejected", [])
+        if not isinstance(prefilter_rejected, list):
+            prefilter_rejected = []
+        candidate_count = payload.get("candidate_count")
+        if candidate_count is None:
+            candidate_count = len(decisions)
+        candidate_count_int = max(0, _safe_int(candidate_count, len(decisions)))
+
+        selected_decisions = []
+        ranked_confidences: list[float] = []
+        ranked_final_scores: list[float] = []
+        for item in decisions:
+            if not isinstance(item, dict):
+                continue
+            conf = _safe_float(item.get("confidence"), -1.0)
+            final_score = _safe_float(item.get("final_score"), -1.0)
+            if conf >= 0.0:
+                ranked_confidences.append(conf)
+            if final_score >= 0.0:
+                ranked_final_scores.append(final_score)
+            pair = str(item.get("pair", "")).strip().upper()
+            if pair and pair in selected_pairs:
+                selected_decisions.append(item)
+
+        def _avg(values: list[float]) -> Optional[float]:
+            if not values:
+                return None
+            return sum(values) / float(len(values))
+
+        selected_confidences = [_safe_float(item.get("confidence"), -1.0) for item in selected_decisions]
+        selected_confidences = [value for value in selected_confidences if value >= 0.0]
+        selected_final_scores = [_safe_float(item.get("final_score"), -1.0) for item in selected_decisions]
+        selected_final_scores = [value for value in selected_final_scores if value >= 0.0]
+
+        selected_count = len(selected_pairs)
+        selected_ratio = (selected_count / float(candidate_count_int)) if candidate_count_int > 0 else None
+        return {
+            "rotation_candidate_count": candidate_count_int,
+            "rotation_selected_count": selected_count,
+            "rotation_prefilter_rejected_count": len(prefilter_rejected),
+            "rotation_selected_ratio": selected_ratio,
+            "rotation_avg_selected_confidence": _avg(selected_confidences),
+            "rotation_avg_selected_final_score": _avg(selected_final_scores),
+            "rotation_avg_ranked_confidence": _avg(ranked_confidences),
+            "rotation_avg_ranked_final_score": _avg(ranked_final_scores),
+            "rotation_source": str(payload.get("source", "")).strip()[:40],
+            "rotation_reason": str(payload.get("reason", "")).strip()[:120],
+        }
+    return None
+
+
 def _local_policy_fallback(payload: dict[str, Any], reason: str) -> dict[str, Any]:
     closed = _safe_int(payload.get("closed_trades"), 0)
     win_rate = _safe_float(payload.get("win_rate"), 0.0)
@@ -246,6 +342,7 @@ def _run_once(
     timeout_seconds: float,
     use_spike: bool,
     spike_db_path: Path,
+    rotation_log_path: Path,
 ) -> None:
     trade_stats = _collect_trade_stats(trades_db_path, lookback_hours)
     payload = {
@@ -263,6 +360,10 @@ def _run_once(
         spike_allowed_rate = _collect_spike_rate(spike_db_path, lookback_hours)
         if spike_allowed_rate is not None:
             payload["spike_allowed_rate"] = float(spike_allowed_rate)
+
+    rotation_metrics = _collect_rotation_metrics(rotation_log_path, lookback_hours)
+    if rotation_metrics:
+        payload.update(rotation_metrics)
 
     policy = _request_policy(bot_api_url=bot_api_url, payload=payload, timeout_seconds=timeout_seconds)
     if not isinstance(policy, dict):
@@ -311,6 +412,10 @@ def main() -> int:
         os.getenv("LLM_POLICY_SPIKE_DB_PATH", "./freqtrade/user_data/logs/spike-scanner.sqlite").strip()
         or "./freqtrade/user_data/logs/spike-scanner.sqlite"
     )
+    rotation_log_path = Path(
+        os.getenv("LLM_POLICY_ROTATION_LOG_PATH", "./freqtrade/user_data/logs/llm-pair-rotation.log").strip()
+        or "./freqtrade/user_data/logs/llm-pair-rotation.log"
+    )
 
     LOGGER.info(
         "starting llm-policy-loop enabled=%s interval_minutes=%s lookback_hours=%s output=%s",
@@ -336,6 +441,7 @@ def main() -> int:
             timeout_seconds=timeout_seconds,
             use_spike=use_spike,
             spike_db_path=spike_db_path,
+            rotation_log_path=rotation_log_path,
         )
 
         if args.once:

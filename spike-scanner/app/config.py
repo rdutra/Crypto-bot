@@ -36,6 +36,10 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
+def _shared_bot_api_url() -> str:
+    return _env_str("LLM_BOT_API_URL", _env_str("BOT_API_URL", "http://bot-api:8000"))
+
+
 class Settings(BaseModel):
     rest_base: str = _env_str("BINANCE_REST_BASE", "https://api.binance.com")
     ws_base: str = _env_str("BINANCE_WS_BASE", "wss://stream.binance.com:9443/stream")
@@ -70,7 +74,7 @@ class Settings(BaseModel):
     outcome_loop_seconds: int = _env_int("SPIKE_OUTCOME_LOOP_SECONDS", 30)
     outcome_batch_size: int = _env_int("SPIKE_OUTCOME_BATCH_SIZE", 200)
     llm_shadow_enabled: bool = _env_bool("SPIKE_LLM_SHADOW_ENABLED", False)
-    llm_shadow_bot_api_url: str = _env_str("SPIKE_LLM_SHADOW_BOT_API_URL", _env_str("BOT_API_URL", "http://bot-api:8000"))
+    llm_shadow_bot_api_url: str = _env_str("SPIKE_LLM_SHADOW_BOT_API_URL", _shared_bot_api_url())
     llm_shadow_timeout_seconds: int = _env_int("SPIKE_LLM_SHADOW_TIMEOUT_SECONDS", 45)
     llm_shadow_min_confidence: float = _env_float("SPIKE_LLM_SHADOW_MIN_CONFIDENCE", 0.65)
     llm_shadow_allowed_regimes: str = _env_str("SPIKE_LLM_SHADOW_ALLOWED_REGIMES", "trend_pullback,breakout")

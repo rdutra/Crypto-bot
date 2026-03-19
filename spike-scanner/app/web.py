@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import re
@@ -12,6 +13,7 @@ from app.storage import PredictionStore
 
 ENTRY_DIAG_LINE_RE = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}).*?Entry diag (?P<payload>.+)$")
 ENTRY_DIAG_CACHE: dict[str, object] = {"path": None, "mtime_ns": None, "size": None, "rows": []}
+ROTATION_LOG_CACHE: dict[str, object] = {"path": None, "mtime_ns": None, "size": None, "rows": []}
 
 
 def _esc(value) -> str:
@@ -84,6 +86,16 @@ def _env_bool(key: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _shared_bot_api_url() -> str:
+    value = os.getenv("LLM_BOT_API_URL")
+    if value and value.strip():
+        return value.strip()
+    value = os.getenv("BOT_API_URL")
+    if value and value.strip():
+        return value.strip()
+    return "http://bot-api:8000"
 
 
 def _normalize_symbol(raw_value) -> str | None:
@@ -304,6 +316,220 @@ def _filter_entry_diag_rows(
     return filtered
 
 
+def _rotation_log_path() -> str:
+    for key in ("SPIKE_ROTATION_LOG_PATH", "LLM_ROTATE_LOG_PATH"):
+        value = os.getenv(key)
+        if value and value.strip():
+            return value.strip()
+    return "/data/llm-pair-rotation.log"
+
+
+def _rotation_log_rows(log_path: str, max_lines: int = 400) -> list[dict[str, object]]:
+    cache_path = str(ROTATION_LOG_CACHE.get("path") or "")
+    cache_mtime = ROTATION_LOG_CACHE.get("mtime_ns")
+    cache_size = ROTATION_LOG_CACHE.get("size")
+    try:
+        stat = os.stat(log_path)
+    except OSError:
+        ROTATION_LOG_CACHE["path"] = log_path
+        ROTATION_LOG_CACHE["mtime_ns"] = None
+        ROTATION_LOG_CACHE["size"] = None
+        ROTATION_LOG_CACHE["rows"] = []
+        return []
+
+    if cache_path == log_path and cache_mtime == stat.st_mtime_ns and cache_size == stat.st_size:
+        cached_rows = ROTATION_LOG_CACHE.get("rows", [])
+        if isinstance(cached_rows, list):
+            return cached_rows
+
+    tail: deque[str] = deque(maxlen=max(20, max_lines))
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                tail.append(line)
+    except OSError:
+        ROTATION_LOG_CACHE["path"] = log_path
+        ROTATION_LOG_CACHE["mtime_ns"] = stat.st_mtime_ns
+        ROTATION_LOG_CACHE["size"] = stat.st_size
+        ROTATION_LOG_CACHE["rows"] = []
+        return []
+
+    rows: list[dict[str, object]] = []
+    for line in reversed(tail):
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        event = str(payload.get("event", "")).strip()
+        if event not in {"rotation_decision", "rotation_no_candidates"}:
+            continue
+        rows.append(payload)
+
+    ROTATION_LOG_CACHE["path"] = log_path
+    ROTATION_LOG_CACHE["mtime_ns"] = stat.st_mtime_ns
+    ROTATION_LOG_CACHE["size"] = stat.st_size
+    ROTATION_LOG_CACHE["rows"] = rows
+    return rows
+
+
+def _latest_entry_diag_by_pair(rows: list[dict[str, object]]) -> dict[str, dict[str, object]]:
+    latest: dict[str, dict[str, object]] = {}
+    for row in rows:
+        pair = str(row.get("pair") or "").upper()
+        if pair and pair not in latest:
+            latest[pair] = row
+    return latest
+
+
+def _rotation_stage_sort(stage: str) -> int:
+    order = {
+        "selected_for_bot": 0,
+        "ranked_rejected": 1,
+        "prefilter_rejected": 2,
+        "metrics_rejected": 3,
+        "whitelist_missing": 4,
+    }
+    return order.get(stage, 9)
+
+
+def _rotation_pair_rows(event: dict[str, object], latest_entry_diags: dict[str, dict[str, object]]) -> list[dict[str, object]]:
+    selected_pairs = {
+        str(item).strip().upper()
+        for item in event.get("selected_pairs", [])
+        if str(item).strip()
+    }
+    rows: list[dict[str, object]] = []
+
+    decisions = event.get("decisions", [])
+    if isinstance(decisions, list):
+        for item in decisions:
+            if not isinstance(item, dict):
+                continue
+            pair = str(item.get("pair", "")).strip().upper()
+            if not pair:
+                continue
+            diag = latest_entry_diags.get(pair, {})
+            selected = bool(item.get("selected", pair in selected_pairs))
+            stage = str(item.get("selection_status", "selected_for_bot" if selected else "ranked_rejected"))
+            rows.append(
+                {
+                    "pair": pair,
+                    "stage": stage,
+                    "selected": selected,
+                    "data_source": str(item.get("data_source", "")),
+                    "regime": str(item.get("regime", "")),
+                    "risk_level": str(item.get("risk_level", "")),
+                    "confidence": item.get("confidence"),
+                    "final_score": item.get("final_score"),
+                    "market_rank_score": item.get("market_rank_score"),
+                    "trading_signal_side": str(item.get("trading_signal_side", "")),
+                    "trading_signal_score": item.get("trading_signal_score"),
+                    "reason": str(item.get("selection_reason", item.get("note", ""))),
+                    "bot_status": str(diag.get("status", "")),
+                    "bot_failed": str(diag.get("failed", "")),
+                    "bot_candle": str(diag.get("candle", "")),
+                }
+            )
+
+    prefilter_rejected = event.get("prefilter_rejected", [])
+    if isinstance(prefilter_rejected, list):
+        for item in prefilter_rejected:
+            if not isinstance(item, dict):
+                continue
+            pair = str(item.get("pair", "")).strip().upper()
+            if not pair:
+                continue
+            diag = latest_entry_diags.get(pair, {})
+            reasons = item.get("reasons", [])
+            if isinstance(reasons, list):
+                reason_text = ", ".join(str(value) for value in reasons if str(value).strip())
+            else:
+                reason_text = str(reasons)
+            rows.append(
+                {
+                    "pair": pair,
+                    "stage": "prefilter_rejected",
+                    "selected": False,
+                    "data_source": "",
+                    "regime": "",
+                    "risk_level": "",
+                    "confidence": None,
+                    "final_score": None,
+                    "market_rank_score": None,
+                    "trading_signal_side": "",
+                    "trading_signal_score": None,
+                    "reason": reason_text,
+                    "bot_status": str(diag.get("status", "")),
+                    "bot_failed": str(diag.get("failed", "")),
+                    "bot_candle": str(diag.get("candle", "")),
+                }
+            )
+
+    skipped = event.get("skipped", [])
+    if isinstance(skipped, list):
+        for item in skipped:
+            if not isinstance(item, dict):
+                continue
+            pair = str(item.get("pair", "")).strip().upper()
+            if not pair:
+                continue
+            diag = latest_entry_diags.get(pair, {})
+            rows.append(
+                {
+                    "pair": pair,
+                    "stage": "metrics_rejected",
+                    "selected": False,
+                    "data_source": "",
+                    "regime": "",
+                    "risk_level": "",
+                    "confidence": None,
+                    "final_score": None,
+                    "market_rank_score": None,
+                    "trading_signal_side": "",
+                    "trading_signal_score": None,
+                    "reason": str(item.get("reason", "")),
+                    "bot_status": str(diag.get("status", "")),
+                    "bot_failed": str(diag.get("failed", "")),
+                    "bot_candle": str(diag.get("candle", "")),
+                }
+            )
+
+    whitelist_missing = event.get("whitelist_missing", [])
+    if isinstance(whitelist_missing, list):
+        for item in whitelist_missing:
+            pair = str(item).strip().upper()
+            if not pair:
+                continue
+            diag = latest_entry_diags.get(pair, {})
+            rows.append(
+                {
+                    "pair": pair,
+                    "stage": "whitelist_missing",
+                    "selected": False,
+                    "data_source": "",
+                    "regime": "",
+                    "risk_level": "",
+                    "confidence": None,
+                    "final_score": None,
+                    "market_rank_score": None,
+                    "trading_signal_side": "",
+                    "trading_signal_score": None,
+                    "reason": "not_in_pair_whitelist",
+                    "bot_status": str(diag.get("status", "")),
+                    "bot_failed": str(diag.get("failed", "")),
+                    "bot_candle": str(diag.get("candle", "")),
+                }
+            )
+
+    rows.sort(key=lambda row: (_rotation_stage_sort(str(row.get("stage", ""))), -float(row.get("final_score") or -1.0), str(row.get("pair", ""))))
+    return rows
+
+
 def _pager_html(
     request: web.Request,
     *,
@@ -464,7 +690,7 @@ async def _fetch_llm_debug_rows(limit: int) -> tuple[list[dict], str | None]:
     if not _env_bool("SPIKE_LLM_DEBUG_TAB_ENABLED", True):
         return [], None
 
-    bot_api_url = os.getenv("SPIKE_LLM_DEBUG_BOT_API_URL", "http://bot-api:8000").strip() or "http://bot-api:8000"
+    bot_api_url = os.getenv("SPIKE_LLM_DEBUG_BOT_API_URL", "").strip() or _shared_bot_api_url()
     try:
         timeout_raw = float(os.getenv("SPIKE_LLM_DEBUG_TIMEOUT_SECONDS", "3"))
     except ValueError:
@@ -530,6 +756,12 @@ async def dashboard(request: web.Request) -> web.Response:
     entry_diag_log_path = os.getenv("FREQTRADE_LOG_PATH", "/data/freqtrade.log")
     entry_diag_max_lines = _parse_int(os.getenv("FREQTRADE_DIAG_MAX_LINES"), 200000, 1000, 2000000)
     entry_diag_rows = _entry_diag_rows(entry_diag_log_path, entry_diag_max_lines)
+    rotation_log_path = _rotation_log_path()
+    rotation_events = _rotation_log_rows(rotation_log_path)
+    latest_rotation_event = rotation_events[0] if rotation_events else {}
+    latest_rotation_pairs = _rotation_pair_rows(latest_rotation_event, _latest_entry_diag_by_pair(entry_diag_rows)) if latest_rotation_event else []
+    if symbol_filter:
+        latest_rotation_pairs = [row for row in latest_rotation_pairs if str(row.get("pair", "")).upper() == symbol_filter]
     filtered_entry_diags = _filter_entry_diag_rows(
         entry_diag_rows,
         symbol=symbol_filter,
@@ -708,6 +940,55 @@ async def dashboard(request: web.Request) -> web.Response:
             )
             for row in llm_debug_page_rows
         ]
+    )
+    rotation_runs_rows_html = "\n".join(
+        [
+            (
+                f"<tr><td>{_esc(row.get('timestamp'))}</td>"
+                f"<td>{_esc(row.get('event'))}</td>"
+                f"<td>{_esc(row.get('source'))}</td>"
+                f"<td>{_esc(row.get('reason'))}</td>"
+                f"<td>{int(row.get('candidate_count', 0) or 0)}</td>"
+                f"<td>{int(row.get('selected_count', len(row.get('selected_pairs', []) if isinstance(row.get('selected_pairs'), list) else [])) or 0)}</td>"
+                f"<td>{int(row.get('prefilter_rejected_count', 0) or 0)}</td>"
+                f"<td>{_fmt_num(row.get('avg_selected_confidence'), 3)}</td>"
+                f"<td>{_fmt_num(row.get('avg_selected_final_score'), 3)}</td>"
+                f"<td>{_esc(_clip_text(' '.join([str(x) for x in row.get('selected_pairs', [])]), 80))}</td></tr>"
+            )
+            for row in rotation_events[:12]
+            if isinstance(row, dict)
+        ]
+    )
+    rotation_pairs_rows_html = "\n".join(
+        [
+            (
+                f"<tr><td>{_esc(row.get('pair'))}</td>"
+                f"<td>{_esc(row.get('stage'))}</td>"
+                f"<td>{'yes' if bool(row.get('selected')) else 'no'}</td>"
+                f"<td>{_esc(row.get('data_source'))}</td>"
+                f"<td>{_esc(row.get('regime'))}</td>"
+                f"<td>{_esc(row.get('risk_level'))}</td>"
+                f"<td>{_fmt_num(row.get('confidence'), 3)}</td>"
+                f"<td>{_fmt_num(row.get('final_score'), 3)}</td>"
+                f"<td>{_fmt_num(row.get('market_rank_score'), 3)}</td>"
+                f"<td>{_esc(str(row.get('trading_signal_side') or ''))} {_fmt_num(row.get('trading_signal_score'), 2)}</td>"
+                f"<td>{_esc(_clip_text(row.get('reason'), 120))}</td>"
+                f"<td>{_esc(row.get('bot_status'))}</td>"
+                f"<td>{_esc(row.get('bot_candle'))}</td>"
+                f"<td>{_esc(_clip_text(row.get('bot_failed'), 120))}</td></tr>"
+            )
+            for row in latest_rotation_pairs
+        ]
+    )
+    latest_rotation_selected_pairs = latest_rotation_event.get("selected_pairs", []) if isinstance(latest_rotation_event, dict) else []
+    latest_rotation_summary = (
+        "Latest run: "
+        f"ts={_esc(latest_rotation_event.get('timestamp')) if latest_rotation_event else 'n/a'} | "
+        f"source={_esc(latest_rotation_event.get('source')) if latest_rotation_event else 'n/a'} | "
+        f"reason={_esc(latest_rotation_event.get('reason')) if latest_rotation_event else 'n/a'} | "
+        f"candidates={int(latest_rotation_event.get('candidate_count', 0) or 0) if latest_rotation_event else 0} | "
+        f"selected={int(latest_rotation_event.get('selected_count', len(latest_rotation_selected_pairs)) or 0) if latest_rotation_event else 0} | "
+        f"prefilter_rejected={int(latest_rotation_event.get('prefilter_rejected_count', 0) or 0) if latest_rotation_event else 0}"
     )
 
     alerts_pager = _pager_html(
@@ -933,6 +1214,7 @@ async def dashboard(request: web.Request) -> web.Response:
   </div>
   <div class="tabs" role="tablist" aria-label="Dashboard sections">
     <button type="button" class="tab-btn active" data-tab="tab-overview">Overview</button>
+    <button type="button" class="tab-btn" data-tab="tab-rotation">Rotation</button>
     <button type="button" class="tab-btn" data-tab="tab-predictions">Predictions</button>
     <button type="button" class="tab-btn" data-tab="tab-evals">LLM Evals</button>
     <button type="button" class="tab-btn" data-tab="tab-diags">Entry Diags</button>
@@ -957,6 +1239,45 @@ async def dashboard(request: web.Request) -> web.Response:
         <table>
           <thead><tr><th>LLM Verdict</th><th>Horizon (min)</th><th>Resolved</th><th>Avg Return</th><th>Win Rate</th></tr></thead>
           <tbody>{llm_summary_rows}</tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-rotation" class="tab-panel">
+    <h2>Pair Rotation Funnel</h2>
+    <div class="section">
+      <div class="muted">Source: {_esc(rotation_log_path)}</div>
+      <div class="muted">{latest_rotation_summary}</div>
+      <div class="muted">Selected pairs: {_esc(" ".join([str(x) for x in latest_rotation_selected_pairs])) if latest_rotation_selected_pairs else "none"}</div>
+    </div>
+
+    <h2>Latest Rotation Pair Outcomes</h2>
+    <div class="section">
+      <div class="wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Pair</th><th>Stage</th><th>Selected</th><th>Source</th><th>Regime</th><th>Risk</th><th>Conf</th><th>Final</th>
+              <th>Mkt Rank</th><th>Signal</th><th>Reason</th><th>Bot Status</th><th>Bot Candle</th><th>Bot Failed Checks</th>
+            </tr>
+          </thead>
+          <tbody>{rotation_pairs_rows_html}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <h2>Recent Rotation Runs</h2>
+    <div class="section">
+      <div class="wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Timestamp</th><th>Event</th><th>Source</th><th>Reason</th><th>Candidates</th><th>Selected</th><th>Prefilter Rejected</th>
+              <th>Avg Selected Conf</th><th>Avg Selected Final</th><th>Selected Pairs</th>
+            </tr>
+          </thead>
+          <tbody>{rotation_runs_rows_html}</tbody>
         </table>
       </div>
     </div>
@@ -1227,9 +1548,14 @@ async def api_llm_debug(request: web.Request) -> web.Response:
     )
 
 
+async def healthz(_: web.Request) -> web.Response:
+    return web.json_response({"ok": True})
+
+
 def create_app(store: PredictionStore) -> web.Application:
     app = web.Application()
     app["store"] = store
+    app.router.add_get("/healthz", healthz)
     app.router.add_get("/", dashboard)
     app.router.add_get("/api/alerts", api_alerts)
     app.router.add_get("/api/outcomes", api_outcomes)

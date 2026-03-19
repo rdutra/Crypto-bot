@@ -34,23 +34,19 @@ openssl rand -base64 24
 5. Build and start infra:
 
 ```bash
-docker compose up -d --build ollama bot-api
+docker compose up -d --build ollama bot-api spike-scanner
 docker compose ps
 curl -s http://localhost:8000/healthz
 ```
 
 Important:
-- `spike-scanner` uses the `scanner` profile and does not start with the default command above.
-- Start it explicitly with:
-
-```bash
-docker compose --profile scanner up -d --build spike-scanner
-```
+- `spike-scanner` is part of the default stack.
+- Scanner health is available at `http://localhost:8091/healthz`.
 
 6. Pull model:
 
 ```bash
-docker compose exec -T ollama ollama pull qwen3:8b
+docker compose exec -T ollama ollama pull llama3.1:8b
 ```
 
 Optional performance tuning for local Ollama (set in `.env`, then recreate `ollama`):
@@ -63,7 +59,7 @@ OLLAMA_SHM_SIZE=1g
 OLLAMA_NUM_PARALLEL=2
 OLLAMA_MAX_LOADED_MODELS=1
 OLLAMA_KEEP_ALIVE=10m
-docker compose up -d --force-recreate ollama bot-api
+docker compose up -d --force-recreate ollama bot-api spike-scanner
 ```
 
 ## 2) Start Trading (Dry-Run)
@@ -83,7 +79,7 @@ Aggressive dry-run:
 After changing `.env` strategy values, recreate `freqtrade` to apply them:
 
 ```bash
-docker compose up -d --force-recreate freqtrade
+docker compose up -d --force-recreate freqtrade scheduler pair-rotator policy-pivot
 ```
 
 Dry-run with risk-pair rotation before startup:
@@ -215,18 +211,16 @@ Wallet status / manual stop:
 ./scripts/wallet-control.sh --stop
 ```
 
-## 7) Spike Scanner Alerts (Separate Service)
-
-Run scanner service (optional profile):
+## 7) Spike Scanner Alerts
 
 ```bash
-docker compose --profile scanner up -d --build spike-scanner
+docker compose up -d --build spike-scanner
 ```
 
 Recreate scanner after config/env changes:
 
 ```bash
-docker compose --profile scanner up -d --force-recreate spike-scanner
+docker compose up -d --force-recreate spike-scanner
 ```
 
 Dashboard:
@@ -261,12 +255,12 @@ Optional notifications (Telegram/Discord) are sent on startup and each alert whe
 Stop scanner:
 
 ```bash
-docker compose --profile scanner stop spike-scanner
+docker compose stop spike-scanner
 ```
 
 Notes:
 
-- Scanner is alert-only (no trading), runs as a separate service.
+- Scanner is alert-only (no trading), but it now runs as a first-class stack service.
 - It reuses existing env variables where possible: `BINANCE_REST_BASE`, `BINANCE_WS_BASE`, `LLM_ROTATE_QUOTE`, `LLM_ROTATE_MIN_QUOTE_VOLUME`, `LLM_ROTATE_EXCLUDE_REGEX`.
 - The scanner now stores predictions and evaluates outcomes at configured horizons (default `60,240,1440,2880` minutes).
 - Optional LLM shadow mode can score the same alerts via `bot-api` and store a parallel verdict (`allowed/blocked/unknown`) for later comparison.
@@ -288,8 +282,8 @@ Core strategy:
 - `ENABLE_LLM_FILTER=true|false`
 - `LLM_MIN_CONFIDENCE=0.65`
 - `LLM_CONNECT_TIMEOUT_SECONDS=2`
-- `LLM_READ_TIMEOUT_SECONDS=45` recommended for slower local models like `qwen3:8b` (`15` is often too low)
-- `OLLAMA_TIMEOUT=90` for `bot-api` model calls (if too low, `/rank-pairs` can fail with `ollama_error`)
+- `LLM_READ_TIMEOUT_SECONDS=45` is only needed for slower local models like `qwen3:8b`
+- `OLLAMA_TIMEOUT=30` is the preferred fast-fail baseline for `bot-api` model calls
 - `LLM_FAIL_OPEN=true` recommended in live/dry-run to avoid blocking entries when LLM is temporarily unavailable
 - `LLM_DEBUG_ENABLED=true`, `LLM_DEBUG_MAX_ENTRIES=250` (in-memory hot cache)
 - `LLM_DEBUG_DB_PATH=/app/data/llm-debug.sqlite`, `LLM_DEBUG_DB_MAX_ROWS=50000` (persistent debug history in sqlite)
@@ -345,19 +339,23 @@ LLM rotation:
   - On CPU-only inference, `10-12` is usually more stable/faster than `20`.
 - `LLM_ROTATE_MIN_QUOTE_VOLUME=20000000`
 - `LLM_ROTATE_EXCLUDE_REGEX=(UP|DOWN|BULL|BEAR|1000|[0-9][0-9][0-9]+L|[0-9][0-9][0-9]+S)`
-- `LLM_ROTATE_TOP_N=3`
+- `LLM_ROTATE_TOP_N=6`
 - `LLM_ROTATE_MIN_CONFIDENCE=0.60`
 - `LLM_ROTATE_ALLOWED_RISK=low medium`
 - `LLM_ROTATE_ALLOWED_REGIMES=trend_pullback` (aggressive default in script: `trend_pullback breakout mean_reversion`)
 - `LLM_ROTATE_SYNC_WHITELIST=true`
+- `LLM_ROTATE_SOURCE_DIVERSITY_ENABLED=true` (reserve part of the final basket for Binance-skill, algo, and spike sources)
+- `LLM_ROTATE_MIN_BINANCE_SKILL_PAIRS=2`
+- `LLM_ROTATE_MIN_ALGO_PAIRS=2`
+- `LLM_ROTATE_MIN_SPIKE_PAIRS=1`
 - `LLM_ROTATE_USE_SPIKE_BIAS=true|false` (prepend recent high-score scanner symbols into rotation candidates)
 - `LLM_ROTATE_SPIKE_DB_PATH=./freqtrade/user_data/logs/spike-scanner.sqlite`
 - `LLM_ROTATE_SPIKE_LOOKBACK_HOURS=48`
-- `LLM_ROTATE_SPIKE_TOP_N=4`
-- `LLM_ROTATE_SPIKE_MIN_SCORE=0.80`
+- `LLM_ROTATE_SPIKE_TOP_N=6`
+- `LLM_ROTATE_SPIKE_MIN_SCORE=0.68`
 - `LLM_ROTATE_SPIKE_REQUIRE_LLM_ALLOWED=false` (if true, only scanner rows where LLM allowed are used)
 - `LLM_ROTATE_USE_SMART_MONEY_BIAS=true|false` (prepend Binance smart-money candidates that are spot-tradable now)
-- `LLM_ROTATE_SMART_MONEY_TOP_N=4`
+- `LLM_ROTATE_SMART_MONEY_TOP_N=6`
 - `LLM_ROTATE_SMART_MONEY_MIN_SCORE=0.60`
 - `LLM_ROTATE_SMART_MONEY_REQUIRE_BUY=true` (if true, only smart-money `buy` side candidates are used)
 - `LLM_ROTATE_SMART_MONEY_FORCE_REFRESH=false` (if true, bypass bot-api trading-signal cache on each rotation)
@@ -414,7 +412,7 @@ Spike scanner:
 - `SPIKE_OUTCOME_BATCH_SIZE=200`
 - `SPIKE_LLM_SHADOW_ENABLED=false`
 - `SPIKE_LLM_SHADOW_BOT_API_URL=http://bot-api:8000`
-- `SPIKE_LLM_SHADOW_TIMEOUT_SECONDS=45` (raise this for slower local models, e.g. `qwen3:8b`)
+- `SPIKE_LLM_SHADOW_TIMEOUT_SECONDS=45` (only raise this if you intentionally run a slower model like `qwen3:8b`)
 - `SPIKE_LLM_SHADOW_MIN_CONFIDENCE=0.65`
 - `SPIKE_LLM_SHADOW_ALLOWED_REGIMES=trend_pullback,breakout,mean_reversion`
 - `SPIKE_LLM_SHADOW_ALLOWED_RISK_LEVELS=low,medium`

@@ -36,6 +36,19 @@ SMART_MONEY_MIN_SCORE="${LLM_ROTATE_SMART_MONEY_MIN_SCORE:-}"
 SMART_MONEY_REQUIRE_BUY="${LLM_ROTATE_SMART_MONEY_REQUIRE_BUY:-}"
 SMART_MONEY_FORCE_REFRESH="${LLM_ROTATE_SMART_MONEY_FORCE_REFRESH:-}"
 SMART_MONEY_FORCE_SLOT="${LLM_ROTATE_SMART_MONEY_FORCE_SLOT:-}"
+SOURCE_DIVERSITY_ENABLED="${LLM_ROTATE_SOURCE_DIVERSITY_ENABLED:-}"
+MIN_BINANCE_SKILL_PAIRS="${LLM_ROTATE_MIN_BINANCE_SKILL_PAIRS:-}"
+MIN_ALGO_PAIRS="${LLM_ROTATE_MIN_ALGO_PAIRS:-}"
+MIN_SPIKE_PAIRS="${LLM_ROTATE_MIN_SPIKE_PAIRS:-}"
+USE_TOKEN_INFO_PREFILTER="${LLM_ROTATE_USE_TOKEN_INFO_PREFILTER:-}"
+TOKEN_INFO_MIN_LIQUIDITY_USD="${LLM_ROTATE_TOKEN_INFO_MIN_LIQUIDITY_USD:-}"
+TOKEN_INFO_MIN_HOLDERS="${LLM_ROTATE_TOKEN_INFO_MIN_HOLDERS:-}"
+TOKEN_INFO_MAX_TOP10_SHARE="${LLM_ROTATE_TOKEN_INFO_MAX_TOP10_SHARE:-}"
+TOKEN_INFO_REQUIRE_BINANCE_SPOT_TRADABLE="${LLM_ROTATE_TOKEN_INFO_REQUIRE_BINANCE_SPOT_TRADABLE:-}"
+TOKEN_INFO_FAIL_OPEN="${LLM_ROTATE_TOKEN_INFO_FAIL_OPEN:-}"
+USE_TOKEN_AUDIT_PREFILTER="${LLM_ROTATE_USE_TOKEN_AUDIT_PREFILTER:-}"
+TOKEN_AUDIT_BLOCK_LEVELS="${LLM_ROTATE_TOKEN_AUDIT_BLOCK_LEVELS:-}"
+TOKEN_AUDIT_FAIL_OPEN="${LLM_ROTATE_TOKEN_AUDIT_FAIL_OPEN:-}"
 MODE="${STRATEGY_MODE:-conservative}"
 APPLY=false
 RESTART=false
@@ -75,11 +88,13 @@ Options:
 
 Notes:
   - LLM ranks; hard filters still apply.
+  - Optional token-info/token-audit prefilters can reject candidates before /rank-pairs.
   - With --apply and sync enabled, selected pairs are auto-added to pair_whitelist.
   - If local data is missing and --data-source=auto, exchange OHLCV is used.
   - Optional: set LLM_ROTATE_USE_SPIKE_BIAS=true to bias candidates with recent scanner winners.
   - Optional: set LLM_ROTATE_USE_SMART_MONEY_BIAS=true to prepend Binance-spot tradable smart-money pairs.
   - Optional: set LLM_ROTATE_SMART_MONEY_FORCE_SLOT=true to guarantee at least one selected smart-money pair.
+  - Optional: set LLM_ROTATE_SOURCE_DIVERSITY_ENABLED=true to reserve selected slots for Binance-skill, algo, and spike sources.
 EOF
 }
 
@@ -137,13 +152,24 @@ if not db_path.exists() or top_n <= 0:
     raise SystemExit(0)
 
 cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, lookback_hours))
-best_by_pair: dict[str, float] = {}
+best_by_pair: dict[str, tuple[int, int, float]] = {}
 
 conn = sqlite3.connect(str(db_path))
 conn.row_factory = sqlite3.Row
 rows = conn.execute(
-    "SELECT ts, symbol, score, llm_allowed FROM alerts ORDER BY id DESC LIMIT 2000"
+    "SELECT ts, symbol, score, llm_allowed, 1 AS source_rank, 1 AS eligible_rank FROM alerts ORDER BY id DESC LIMIT 2000"
 ).fetchall()
+if not rows:
+    rows = conn.execute(
+        """
+        SELECT ts, symbol, score, llm_allowed,
+               0 AS source_rank,
+               CASE WHEN eligible_alert = 1 THEN 1 ELSE 0 END AS eligible_rank
+        FROM llm_shadow_evals
+        ORDER BY id DESC
+        LIMIT 4000
+        """
+    ).fetchall()
 conn.close()
 
 for row in rows:
@@ -174,9 +200,12 @@ for row in rows:
     if not base:
         continue
     pair = f"{base}/{quote}"
+    source_rank = int(row["source_rank"] or 0)
+    eligible_rank = int(row["eligible_rank"] or 0)
+    current = (eligible_rank, source_rank, score)
     prev = best_by_pair.get(pair)
-    if prev is None or score > prev:
-        best_by_pair[pair] = score
+    if prev is None or current > prev:
+        best_by_pair[pair] = current
 
 ordered = sorted(best_by_pair.items(), key=lambda item: item[1], reverse=True)[:top_n]
 print(" ".join(pair for pair, _ in ordered))
@@ -309,6 +338,167 @@ for item in items:
         break
 
 print(" ".join(picked))
+PY
+}
+
+apply_skill_prefilters() {
+  local bot_api_url="$1"
+  local metrics_json="$2"
+  local use_token_info="$3"
+  local min_liquidity_usd="$4"
+  local min_holders="$5"
+  local max_top10_share="$6"
+  local require_spot_tradable="$7"
+  local token_info_fail_open="$8"
+  local use_token_audit="$9"
+  local token_audit_block_levels="${10}"
+  local token_audit_fail_open="${11}"
+  python3 - "$bot_api_url" "$metrics_json" "$use_token_info" "$min_liquidity_usd" "$min_holders" "$max_top10_share" "$require_spot_tradable" "$token_info_fail_open" "$use_token_audit" "$token_audit_block_levels" "$token_audit_fail_open" <<'PY'
+import json
+import sys
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+
+def as_bool(raw: str, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def fetch_json(base_url: str, path: str, params: dict[str, str]):
+    query = urlencode({k: v for k, v in params.items() if v not in {"", None}})
+    url = f"{base_url.rstrip('/')}{path}"
+    if query:
+        url = f"{url}?{query}"
+    req = Request(url=url, method="GET", headers={"Accept": "application/json"})
+    with urlopen(req, timeout=20.0) as resp:
+        return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+
+def parse_levels(raw: str) -> set[str]:
+    return {part.strip().lower() for part in str(raw or "").replace(",", " ").split() if part.strip()}
+
+
+def choose_info_item(items: list[dict]):
+    if not items:
+        return None
+    tradable = [item for item in items if bool(item.get("is_binance_spot_tradable", False))]
+    if tradable:
+        return tradable[0]
+    return items[0]
+
+
+bot_api_url = sys.argv[1]
+payload = json.loads(sys.argv[2])
+use_token_info = as_bool(sys.argv[3], default=False)
+min_liquidity_usd = float(sys.argv[4] or "0")
+min_holders = int(float(sys.argv[5] or "0"))
+max_top10_share = float(sys.argv[6] or "1")
+require_spot_tradable = as_bool(sys.argv[7], default=True)
+token_info_fail_open = as_bool(sys.argv[8], default=True)
+use_token_audit = as_bool(sys.argv[9], default=False)
+token_audit_block_levels = parse_levels(sys.argv[10])
+token_audit_fail_open = as_bool(sys.argv[11], default=True)
+
+survivors = []
+rejected = []
+notes = list(payload.get("prefilter_notes", []) or [])
+
+for candidate in payload.get("candidates", []):
+    pair = str(candidate.get("pair", "")).strip().upper()
+    if "/" not in pair:
+        survivors.append(candidate)
+        continue
+    base, _ = pair.split("/", 1)
+    info_item = None
+
+    if use_token_info:
+        try:
+            info_resp = fetch_json(
+                bot_api_url,
+                "/skills/query-token-info",
+                {"symbol": base, "limit": "10", "force_refresh": "false"},
+            )
+            info_items = info_resp.get("items", []) if isinstance(info_resp, dict) else []
+            info_item = choose_info_item([row for row in info_items if isinstance(row, dict)])
+        except Exception as exc:
+            if token_info_fail_open:
+                notes.append(f"token_info_fail_open:{pair}:{type(exc).__name__}")
+            else:
+                rejected.append({"pair": pair, "stage": "token_info", "reasons": [f"request_error:{type(exc).__name__}"]})
+                continue
+
+        if info_item is None:
+            if token_info_fail_open:
+                notes.append(f"token_info_no_data_fail_open:{pair}")
+            else:
+                rejected.append({"pair": pair, "stage": "token_info", "reasons": ["no_token_info"]})
+                continue
+        else:
+            reasons = []
+            liquidity = float(info_item.get("liquidity_usd", 0.0) or 0.0)
+            holders = int(float(info_item.get("holders", 0) or 0))
+            top10 = float(info_item.get("top10_holder_share", 0.0) or 0.0)
+            tradable = bool(info_item.get("is_binance_spot_tradable", False))
+            if require_spot_tradable and not tradable:
+                reasons.append("not_binance_spot_tradable")
+            if min_liquidity_usd > 0 and liquidity < min_liquidity_usd:
+                reasons.append(f"liquidity_below:{liquidity:.2f}")
+            if min_holders > 0 and holders < min_holders:
+                reasons.append(f"holders_below:{holders}")
+            if max_top10_share >= 0 and top10 > max_top10_share:
+                reasons.append(f"top10_share_above:{top10:.4f}")
+            if reasons:
+                rejected.append({"pair": pair, "stage": "token_info", "reasons": reasons})
+                continue
+
+    if use_token_audit:
+        audit_params = {"symbol": base}
+        if info_item:
+            contract_address = str(info_item.get("contract_address", "")).strip()
+            chain = str(info_item.get("chain", "")).strip()
+            if contract_address and chain:
+                audit_params = {"address": contract_address, "chain_id": chain}
+        try:
+            audit_resp = fetch_json(
+                bot_api_url,
+                "/skills/query-token-audit",
+                {**audit_params, "limit": "5", "force_refresh": "false"},
+            )
+            audit_items = audit_resp.get("items", []) if isinstance(audit_resp, dict) else []
+            audit_item = audit_items[0] if audit_items else None
+        except Exception as exc:
+            if token_audit_fail_open:
+                notes.append(f"token_audit_fail_open:{pair}:{type(exc).__name__}")
+                audit_item = None
+            else:
+                rejected.append({"pair": pair, "stage": "token_audit", "reasons": [f"request_error:{type(exc).__name__}"]})
+                continue
+
+        if audit_item is None:
+            if not token_audit_fail_open:
+                rejected.append({"pair": pair, "stage": "token_audit", "reasons": ["no_token_audit"]})
+                continue
+            notes.append(f"token_audit_no_data_fail_open:{pair}")
+        else:
+            classification = str(audit_item.get("classification", "")).strip().lower()
+            if classification in token_audit_block_levels:
+                rejected.append(
+                    {
+                        "pair": pair,
+                        "stage": "token_audit",
+                        "reasons": [f"classification_blocked:{classification}"],
+                    }
+                )
+                continue
+
+    survivors.append(candidate)
+
+payload["candidates"] = survivors
+payload["prefilter_rejected"] = rejected
+payload["prefilter_notes"] = notes
+print(json.dumps(payload, separators=(",", ":")))
 PY
 }
 
@@ -509,6 +699,45 @@ fi
 if [[ -z "${SMART_MONEY_FORCE_SLOT}" ]]; then
   SMART_MONEY_FORCE_SLOT="$(get_env_file_value LLM_ROTATE_SMART_MONEY_FORCE_SLOT || true)"
 fi
+if [[ -z "${SOURCE_DIVERSITY_ENABLED}" ]]; then
+  SOURCE_DIVERSITY_ENABLED="$(get_env_file_value LLM_ROTATE_SOURCE_DIVERSITY_ENABLED || true)"
+fi
+if [[ -z "${MIN_BINANCE_SKILL_PAIRS}" ]]; then
+  MIN_BINANCE_SKILL_PAIRS="$(get_env_file_value LLM_ROTATE_MIN_BINANCE_SKILL_PAIRS || true)"
+fi
+if [[ -z "${MIN_ALGO_PAIRS}" ]]; then
+  MIN_ALGO_PAIRS="$(get_env_file_value LLM_ROTATE_MIN_ALGO_PAIRS || true)"
+fi
+if [[ -z "${MIN_SPIKE_PAIRS}" ]]; then
+  MIN_SPIKE_PAIRS="$(get_env_file_value LLM_ROTATE_MIN_SPIKE_PAIRS || true)"
+fi
+if [[ -z "${USE_TOKEN_INFO_PREFILTER}" ]]; then
+  USE_TOKEN_INFO_PREFILTER="$(get_env_file_value LLM_ROTATE_USE_TOKEN_INFO_PREFILTER || true)"
+fi
+if [[ -z "${TOKEN_INFO_MIN_LIQUIDITY_USD}" ]]; then
+  TOKEN_INFO_MIN_LIQUIDITY_USD="$(get_env_file_value LLM_ROTATE_TOKEN_INFO_MIN_LIQUIDITY_USD || true)"
+fi
+if [[ -z "${TOKEN_INFO_MIN_HOLDERS}" ]]; then
+  TOKEN_INFO_MIN_HOLDERS="$(get_env_file_value LLM_ROTATE_TOKEN_INFO_MIN_HOLDERS || true)"
+fi
+if [[ -z "${TOKEN_INFO_MAX_TOP10_SHARE}" ]]; then
+  TOKEN_INFO_MAX_TOP10_SHARE="$(get_env_file_value LLM_ROTATE_TOKEN_INFO_MAX_TOP10_SHARE || true)"
+fi
+if [[ -z "${TOKEN_INFO_REQUIRE_BINANCE_SPOT_TRADABLE}" ]]; then
+  TOKEN_INFO_REQUIRE_BINANCE_SPOT_TRADABLE="$(get_env_file_value LLM_ROTATE_TOKEN_INFO_REQUIRE_BINANCE_SPOT_TRADABLE || true)"
+fi
+if [[ -z "${TOKEN_INFO_FAIL_OPEN}" ]]; then
+  TOKEN_INFO_FAIL_OPEN="$(get_env_file_value LLM_ROTATE_TOKEN_INFO_FAIL_OPEN || true)"
+fi
+if [[ -z "${USE_TOKEN_AUDIT_PREFILTER}" ]]; then
+  USE_TOKEN_AUDIT_PREFILTER="$(get_env_file_value LLM_ROTATE_USE_TOKEN_AUDIT_PREFILTER || true)"
+fi
+if [[ -z "${TOKEN_AUDIT_BLOCK_LEVELS}" ]]; then
+  TOKEN_AUDIT_BLOCK_LEVELS="$(get_env_file_value LLM_ROTATE_TOKEN_AUDIT_BLOCK_LEVELS || true)"
+fi
+if [[ -z "${TOKEN_AUDIT_FAIL_OPEN}" ]]; then
+  TOKEN_AUDIT_FAIL_OPEN="$(get_env_file_value LLM_ROTATE_TOKEN_AUDIT_FAIL_OPEN || true)"
+fi
 USE_SPIKE_BIAS="${USE_SPIKE_BIAS:-false}"
 SPIKE_DB_PATH="${SPIKE_DB_PATH:-${ROOT_DIR}/freqtrade/user_data/logs/spike-scanner.sqlite}"
 SPIKE_LOOKBACK_HOURS="${SPIKE_LOOKBACK_HOURS:-48}"
@@ -521,6 +750,19 @@ SMART_MONEY_MIN_SCORE="${SMART_MONEY_MIN_SCORE:-0.60}"
 SMART_MONEY_REQUIRE_BUY="${SMART_MONEY_REQUIRE_BUY:-true}"
 SMART_MONEY_FORCE_REFRESH="${SMART_MONEY_FORCE_REFRESH:-false}"
 SMART_MONEY_FORCE_SLOT="${SMART_MONEY_FORCE_SLOT:-true}"
+SOURCE_DIVERSITY_ENABLED="${SOURCE_DIVERSITY_ENABLED:-true}"
+MIN_BINANCE_SKILL_PAIRS="${MIN_BINANCE_SKILL_PAIRS:-2}"
+MIN_ALGO_PAIRS="${MIN_ALGO_PAIRS:-2}"
+MIN_SPIKE_PAIRS="${MIN_SPIKE_PAIRS:-1}"
+USE_TOKEN_INFO_PREFILTER="${USE_TOKEN_INFO_PREFILTER:-true}"
+TOKEN_INFO_MIN_LIQUIDITY_USD="${TOKEN_INFO_MIN_LIQUIDITY_USD:-1000000}"
+TOKEN_INFO_MIN_HOLDERS="${TOKEN_INFO_MIN_HOLDERS:-1000}"
+TOKEN_INFO_MAX_TOP10_SHARE="${TOKEN_INFO_MAX_TOP10_SHARE:-0.90}"
+TOKEN_INFO_REQUIRE_BINANCE_SPOT_TRADABLE="${TOKEN_INFO_REQUIRE_BINANCE_SPOT_TRADABLE:-true}"
+TOKEN_INFO_FAIL_OPEN="${TOKEN_INFO_FAIL_OPEN:-true}"
+USE_TOKEN_AUDIT_PREFILTER="${USE_TOKEN_AUDIT_PREFILTER:-true}"
+TOKEN_AUDIT_BLOCK_LEVELS="${TOKEN_AUDIT_BLOCK_LEVELS:-avoid}"
+TOKEN_AUDIT_FAIL_OPEN="${TOKEN_AUDIT_FAIL_OPEN:-true}"
 if ! [[ "${SPIKE_LOOKBACK_HOURS}" =~ ^[0-9]+$ ]]; then
   echo "LLM_ROTATE_SPIKE_LOOKBACK_HOURS must be an integer." >&2
   exit 1
@@ -539,6 +781,30 @@ if ! [[ "${SMART_MONEY_TOP_N}" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "${SMART_MONEY_MIN_SCORE}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   echo "LLM_ROTATE_SMART_MONEY_MIN_SCORE must be numeric." >&2
+  exit 1
+fi
+if ! [[ "${MIN_BINANCE_SKILL_PAIRS}" =~ ^[0-9]+$ ]]; then
+  echo "LLM_ROTATE_MIN_BINANCE_SKILL_PAIRS must be an integer." >&2
+  exit 1
+fi
+if ! [[ "${MIN_ALGO_PAIRS}" =~ ^[0-9]+$ ]]; then
+  echo "LLM_ROTATE_MIN_ALGO_PAIRS must be an integer." >&2
+  exit 1
+fi
+if ! [[ "${MIN_SPIKE_PAIRS}" =~ ^[0-9]+$ ]]; then
+  echo "LLM_ROTATE_MIN_SPIKE_PAIRS must be an integer." >&2
+  exit 1
+fi
+if ! [[ "${TOKEN_INFO_MIN_LIQUIDITY_USD}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "LLM_ROTATE_TOKEN_INFO_MIN_LIQUIDITY_USD must be numeric." >&2
+  exit 1
+fi
+if ! [[ "${TOKEN_INFO_MIN_HOLDERS}" =~ ^[0-9]+$ ]]; then
+  echo "LLM_ROTATE_TOKEN_INFO_MIN_HOLDERS must be an integer." >&2
+  exit 1
+fi
+if ! [[ "${TOKEN_INFO_MAX_TOP10_SHARE}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "LLM_ROTATE_TOKEN_INFO_MAX_TOP10_SHARE must be numeric." >&2
   exit 1
 fi
 if ! is_true "${AUTO_DISCOVER}"; then
@@ -610,7 +876,7 @@ if ! is_true "${AUTO_DISCOVER}" && [[ -z "${CANDIDATES}" ]] && [[ -z "${SPIKE_BI
 fi
 
 if ! is_true "${ROTATE_SKIP_BOOTSTRAP_SERVICES:-false}"; then
-  docker compose up -d ollama bot-api >/dev/null
+  docker compose up -d ollama bot-api spike-scanner >/dev/null
 fi
 
 echo "Preparing candidate metrics..."
@@ -847,9 +1113,21 @@ if config_path.exists():
 exchange = build_exchange(exchange_id)
 
 candidates = []
+candidate_sources: dict[str, set[str]] = {}
 discovery_notes = []
+
+
+def add_candidates(items, source_label: str):
+    for pair in items:
+        if not pair:
+            continue
+        pair = pair.upper()
+        candidates.append(pair)
+        candidate_sources.setdefault(pair, set()).add(source_label)
+
+
 if manual_candidates:
-    candidates.extend(manual_candidates)
+    add_candidates(manual_candidates, "manual")
     discovery_notes.append("source=manual")
 if auto_discover:
     discovered, notes = discover_candidates(
@@ -860,20 +1138,26 @@ if auto_discover:
         min_quote_volume=min_quote_volume,
         exclude_regex=exclude_regex,
     )
-    candidates.extend(discovered)
+    add_candidates(discovered, "algo")
     discovery_notes.append("source=exchange_discovery")
     for note in notes[:20]:
         discovery_notes.append(note)
 elif not candidates:
     fallback = sorted(pair_whitelist) if pair_whitelist else []
     candidates = [p for p in fallback if p not in core_pairs][:max_candidates]
+    for pair in candidates:
+        candidate_sources.setdefault(pair, set()).add("algo")
     discovery_notes.append("source=whitelist_fallback")
 
 if spike_candidates:
-    candidates = spike_candidates + candidates
+    for pair in reversed(spike_candidates):
+        candidates.insert(0, pair)
+        candidate_sources.setdefault(pair.upper(), set()).add("spike")
     discovery_notes.append(f"source=spike_bias count={len(spike_candidates)}")
 if smart_money_candidates:
-    candidates = smart_money_candidates + candidates
+    for pair in reversed(smart_money_candidates):
+        candidates.insert(0, pair)
+        candidate_sources.setdefault(pair.upper(), set()).add("binance_skill")
     discovery_notes.append(f"source=smart_money_bias count={len(smart_money_candidates)}")
 
 # Deduplicate while preserving order.
@@ -987,11 +1271,27 @@ for pair in ordered_candidates:
             "market_structure": market_structure,
             "deterministic_score": score,
             "data_source": source_used,
+            "candidate_sources": sorted(candidate_sources.get(pair, set())),
         }
     )
 
 print(json.dumps(result, separators=(",", ":")))
 PY'
+)"
+
+metrics_json="$(
+  apply_skill_prefilters \
+    "${BOT_API_URL}" \
+    "${metrics_json}" \
+    "${USE_TOKEN_INFO_PREFILTER}" \
+    "${TOKEN_INFO_MIN_LIQUIDITY_USD}" \
+    "${TOKEN_INFO_MIN_HOLDERS}" \
+    "${TOKEN_INFO_MAX_TOP10_SHARE}" \
+    "${TOKEN_INFO_REQUIRE_BINANCE_SPOT_TRADABLE}" \
+    "${TOKEN_INFO_FAIL_OPEN}" \
+    "${USE_TOKEN_AUDIT_PREFILTER}" \
+    "${TOKEN_AUDIT_BLOCK_LEVELS}" \
+    "${TOKEN_AUDIT_FAIL_OPEN}"
 )"
 
 candidate_count="$(
@@ -1013,8 +1313,12 @@ import sys
 payload = json.loads(sys.argv[1])
 for note in payload.get("discovery_notes", []):
     print(f"- {note}")
+for note in payload.get("prefilter_notes", []):
+    print(f"- {note}")
 for row in payload.get("skipped", []):
     print(f"- skipped {row.get('pair')}: {row.get('reason')}")
+for row in payload.get("prefilter_rejected", []):
+    print(f"- prefilter {row.get('pair')}: {', '.join([str(x) for x in row.get('reasons', [])])}")
 for pair in payload.get("whitelist_missing", []):
     print(f"- not in pair_whitelist: {pair}")
 PY
@@ -1042,7 +1346,18 @@ entry = {
     "data_source": data_source,
     "auto_discover": auto_discover,
     "selected_pairs": [],
+    "candidate_count": len(meta.get("candidates", [])),
+    "ranked_count": 0,
+    "selected_count": 0,
+    "prefilter_rejected_count": len(meta.get("prefilter_rejected", [])),
+    "selected_ratio": 0.0,
+    "avg_ranked_confidence": None,
+    "avg_ranked_final_score": None,
+    "avg_selected_confidence": None,
+    "avg_selected_final_score": None,
     "discovery_notes": meta.get("discovery_notes", []),
+    "prefilter_notes": meta.get("prefilter_notes", []),
+    "prefilter_rejected": meta.get("prefilter_rejected", []),
     "whitelist_missing": meta.get("whitelist_missing", []),
     "skipped": meta.get("skipped", []),
 }
@@ -1067,6 +1382,7 @@ allowed_regimes = [x.strip().lower() for x in sys.argv[5].replace(",", " ").spli
 
 for item in payload.get("candidates", []):
     item.pop("data_source", None)
+    item.pop("candidate_sources", None)
 
 body = {
     "candidates": payload["candidates"],
@@ -1097,6 +1413,10 @@ sources = {
     item.get("pair"): item.get("data_source", "?")
     for item in meta.get("candidates", [])
 }
+origins = {
+    item.get("pair"): ",".join([str(x) for x in item.get("candidate_sources", []) if str(x).strip()]) or "-"
+    for item in meta.get("candidates", [])
+}
 
 print(f"source={ranked.get('source')} selected={', '.join(ranked.get('selected_pairs', [])) or 'none'}")
 print(f"reason={ranked.get('reason', 'n/a')}")
@@ -1110,11 +1430,12 @@ if ranked.get("market_rank_errors"):
     print(f"market_rank_errors={','.join([str(x) for x in ranked.get('market_rank_errors', [])])}")
 if ranked.get("trading_signal_errors"):
     print(f"trading_signal_errors={','.join([str(x) for x in ranked.get('trading_signal_errors', [])])}")
-print("pair        src      final  det  conf  sig(side/score)   risk    regime          note")
+print("pair        src      origin               final  det  conf  sig(side/score)   risk    regime          note")
 for item in ranked.get("decisions", []):
     pair_name = item.get("pair", "")
     pair = f"{pair_name:<10}"
     src = f"{sources.get(pair_name, '?'):<7}"
+    origin = f"{origins.get(pair_name, '-'):<19}"
     final = f"{float(item.get('final_score', 0.0)):>5.2f}"
     det = f"{float(item.get('deterministic_score', 0.0)):>4.2f}"
     conf = f"{float(item.get('confidence', 0.0)):>4.2f}"
@@ -1125,13 +1446,25 @@ for item in ranked.get("decisions", []):
     risk = f"{str(item.get('risk_level', '')):<7}"
     regime = f"{str(item.get('regime', '')):<15}"
     note = str(item.get("note", ""))[:60]
-    print(f"{pair}  {src}  {final}  {det}  {conf}  {sig} {risk} {regime} {note}")
+    print(f"{pair}  {src}  {origin} {final}  {det}  {conf}  {sig} {risk} {regime} {note}")
 
 if meta.get("discovery_notes"):
     print("")
     print("Discovery notes:")
     for note in meta["discovery_notes"][:20]:
         print(f"- {note}")
+
+if meta.get("prefilter_notes"):
+    print("")
+    print("Prefilter notes:")
+    for note in meta["prefilter_notes"][:20]:
+        print(f"- {note}")
+
+if meta.get("prefilter_rejected"):
+    print("")
+    print("Prefilter rejected:")
+    for row in meta["prefilter_rejected"][:20]:
+        print(f"- {row.get('pair')}: {', '.join([str(x) for x in row.get('reasons', [])])}")
 
 if meta.get("whitelist_missing"):
     print("")
@@ -1153,7 +1486,8 @@ PY
 
 selected_pairs_before_force="${selected_pairs}"
 selected_pairs="$(
-  python3 - "${selected_pairs}" "${SMART_MONEY_BIAS_CANDIDATES}" "${TOP_N}" "${USE_SMART_MONEY_BIAS}" "${SMART_MONEY_FORCE_SLOT}" <<'PY'
+  python3 - "${rank_response}" "${metrics_json}" "${TOP_N}" "${MIN_CONFIDENCE}" "${ALLOWED_RISK}" "${ALLOWED_REGIMES}" "${USE_SMART_MONEY_BIAS}" "${SMART_MONEY_FORCE_SLOT}" "${SOURCE_DIVERSITY_ENABLED}" "${MIN_BINANCE_SKILL_PAIRS}" "${MIN_ALGO_PAIRS}" "${MIN_SPIKE_PAIRS}" <<'PY'
+import json
 import sys
 
 
@@ -1169,31 +1503,87 @@ def parse_pairs(raw: str):
     return out
 
 
-selected = parse_pairs(sys.argv[1])
-smart = parse_pairs(sys.argv[2])
+def as_bool(raw: str) -> bool:
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+ranked = json.loads(sys.argv[1])
+meta = json.loads(sys.argv[2])
 top_n = int(float(sys.argv[3]))
-use_smart = str(sys.argv[4]).strip().lower() in {"1", "true", "yes", "on"}
-force_slot = str(sys.argv[5]).strip().lower() in {"1", "true", "yes", "on"}
+use_smart = as_bool(sys.argv[7])
+force_smart_slot = as_bool(sys.argv[8])
+diversity_enabled = as_bool(sys.argv[9])
+min_binance = int(float(sys.argv[10]))
+min_algo = int(float(sys.argv[11]))
+min_spike = int(float(sys.argv[12]))
 
-if use_smart and force_slot and top_n > 0 and smart:
-    smart_set = set(smart)
-    if not any(pair in smart_set for pair in selected):
-        pick = smart[0]
-        if pick not in selected:
-            if len(selected) >= top_n:
-                selected = selected[: max(0, top_n - 1)] + [pick]
-            else:
-                selected.append(pick)
+origins_by_pair = {
+    str(item.get("pair", "")).upper(): {str(x).strip().lower() for x in item.get("candidate_sources", []) if str(x).strip()}
+    for item in meta.get("candidates", [])
+    if str(item.get("pair", "")).strip()
+}
 
-if len(selected) > top_n:
-    selected = selected[:top_n]
+ranked_order = []
+seen_ranked = set()
+for pair in parse_pairs(" ".join([str(x) for x in ranked.get("selected_pairs", [])])):
+    if pair not in seen_ranked:
+        ranked_order.append(pair)
+        seen_ranked.add(pair)
+for item in ranked.get("decisions", []):
+    pair = str(item.get("pair", "")).upper()
+    if not pair or pair in seen_ranked:
+        continue
+    ranked_order.append(pair)
+    seen_ranked.add(pair)
+
+if not ranked_order or top_n <= 0:
+    print("")
+    raise SystemExit(0)
+
+quotas = {"binance_skill": 0, "algo": 0, "spike": 0}
+if diversity_enabled:
+    quotas["binance_skill"] = max(0, min_binance)
+    quotas["algo"] = max(0, min_algo)
+    quotas["spike"] = max(0, min_spike)
+if use_smart and force_smart_slot:
+    quotas["binance_skill"] = max(quotas["binance_skill"], 1)
+
+selected = []
+selected_set = set()
+
+def try_pick(source_name: str, quota: int):
+    if quota <= 0:
+        return
+    picked = 0
+    for pair in ranked_order:
+        if picked >= quota or len(selected) >= top_n:
+            return
+        if pair in selected_set:
+            continue
+        if source_name not in origins_by_pair.get(pair, set()):
+            continue
+        selected.append(pair)
+        selected_set.add(pair)
+        picked += 1
+
+
+for source_name in ("binance_skill", "algo", "spike"):
+    try_pick(source_name, quotas.get(source_name, 0))
+
+for pair in ranked_order:
+    if len(selected) >= top_n:
+        break
+    if pair in selected_set:
+        continue
+    selected.append(pair)
+    selected_set.add(pair)
 
 print(" ".join(selected))
 PY
 )"
 
 if [[ "${selected_pairs}" != "${selected_pairs_before_force}" ]]; then
-  echo "Applied smart-money slot enforcement -> selected=${selected_pairs}"
+  echo "Applied source diversity enforcement -> selected=${selected_pairs}"
 fi
 
 python3 - "${metrics_json}" "${rank_response}" "${LOG_PATH}" "${TOP_N}" "${MIN_CONFIDENCE}" "${ALLOWED_RISK}" "${ALLOWED_REGIMES}" "${DATA_SOURCE}" "${AUTO_DISCOVER}" "${APPLY}" "${RESTART}" "${SYNC_WHITELIST}" "${MODE}" "${selected_pairs}" <<'PY'
@@ -1220,24 +1610,88 @@ sources = {
     item.get("pair"): item.get("data_source", "?")
     for item in meta.get("candidates", [])
 }
+candidate_origins = {
+    item.get("pair"): [str(x) for x in item.get("candidate_sources", []) if str(x).strip()]
+    for item in meta.get("candidates", [])
+}
+selected_set = set(selected_pairs_override or [str(x).upper() for x in ranked.get("selected_pairs", []) if str(x).strip()])
+candidate_count = len(meta.get("candidates", []))
+prefilter_rejected = meta.get("prefilter_rejected", [])
+if not isinstance(prefilter_rejected, list):
+    prefilter_rejected = []
 decisions = []
+ranked_confidences = []
+ranked_final_scores = []
+selected_confidences = []
+selected_final_scores = []
 for item in ranked.get("decisions", []):
     pair = str(item.get("pair", ""))
+    confidence = item.get("confidence")
+    final_score = item.get("final_score")
+    regime = str(item.get("regime", "")).strip().lower()
+    risk_level = str(item.get("risk_level", "")).strip().lower()
+    confidence_value = float(confidence or 0.0)
+    final_score_value = float(final_score or 0.0)
+    ranked_confidences.append(confidence_value)
+    ranked_final_scores.append(final_score_value)
+    selected = pair.upper() in selected_set
+    selection_reasons = []
+    if selected:
+        selection_status = "selected_for_bot"
+        selection_reasons.append("selected")
+        if confidence_value < min_conf:
+            selection_reasons.append(f"confidence_below:{min_conf:.2f}")
+        if regime and regime not in allowed_regimes:
+            selection_reasons.append(f"regime_blocked:{regime}")
+        if risk_level and risk_level not in allowed_risk:
+            selection_reasons.append(f"risk_blocked:{risk_level}")
+        selected_confidences.append(confidence_value)
+        selected_final_scores.append(final_score_value)
+    else:
+        if confidence_value < min_conf:
+            selection_reasons.append(f"confidence_below:{min_conf:.2f}")
+        if regime and regime not in allowed_regimes:
+            selection_reasons.append(f"regime_blocked:{regime}")
+        if risk_level and risk_level not in allowed_risk:
+            selection_reasons.append(f"risk_blocked:{risk_level}")
+        if not selection_reasons:
+            selection_reasons.append("not_in_final_selection")
+        selection_status = "ranked_rejected"
     decisions.append(
         {
             "pair": pair,
             "data_source": sources.get(pair, "?"),
+            "candidate_sources": candidate_origins.get(pair, []),
             "regime": item.get("regime"),
             "risk_level": item.get("risk_level"),
-            "confidence": item.get("confidence"),
+            "confidence": confidence_value,
             "deterministic_score": item.get("deterministic_score"),
             "market_rank_score": item.get("market_rank_score"),
             "trading_signal_side": item.get("trading_signal_side"),
             "trading_signal_score": item.get("trading_signal_score"),
-            "final_score": item.get("final_score"),
+            "final_score": final_score_value,
             "note": item.get("note"),
+            "selected": selected,
+            "selection_status": selection_status,
+            "selection_reason": ", ".join(selection_reasons),
         }
     )
+
+
+def avg(values):
+    if not values:
+        return None
+    return sum(values) / float(len(values))
+
+
+selected_source_counts = {"binance_skill": 0, "algo": 0, "spike": 0}
+for item in decisions:
+    if not item.get("selected"):
+        continue
+    for source_name in item.get("candidate_sources", []):
+        if source_name not in selected_source_counts:
+            selected_source_counts[source_name] = 0
+        selected_source_counts[source_name] += 1
 
 entry = {
     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1259,7 +1713,19 @@ entry = {
     "restart": restart_mode,
     "sync_whitelist": sync_whitelist,
     "strategy_mode": mode,
+    "candidate_count": candidate_count,
+    "ranked_count": len(decisions),
+    "selected_count": len(selected_set),
+    "prefilter_rejected_count": len(prefilter_rejected),
+    "selected_ratio": (len(selected_set) / float(candidate_count)) if candidate_count > 0 else None,
+    "avg_ranked_confidence": avg(ranked_confidences),
+    "avg_ranked_final_score": avg(ranked_final_scores),
+    "avg_selected_confidence": avg(selected_confidences),
+    "avg_selected_final_score": avg(selected_final_scores),
+    "selected_source_counts": selected_source_counts,
     "discovery_notes": meta.get("discovery_notes", []),
+    "prefilter_notes": meta.get("prefilter_notes", []),
+    "prefilter_rejected": prefilter_rejected,
     "whitelist_missing": meta.get("whitelist_missing", []),
     "skipped": meta.get("skipped", []),
     "decisions": decisions,
