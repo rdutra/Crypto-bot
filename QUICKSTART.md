@@ -20,7 +20,7 @@ Fill required values in `.env`:
 
 Keep `dry_run: true` in `freqtrade/user_data/config.json` for paper trading.
 
-Pull the local model if using `LLM_PROVIDER=ollama`:
+Install or start Ollama on the host if using `LLM_PROVIDER=ollama`, then bootstrap the stack:
 
 ```bash
 ./scripts/bootstrap.sh
@@ -36,7 +36,7 @@ LLM_MODEL=gpt-4.1-mini
 docker compose up -d --force-recreate bot-api
 ```
 
-Optional: tune Ollama resources in `.env` for faster responses, then recreate:
+Optional: tune the dockerized Ollama container if you explicitly set `OLLAMA_BASE_URL=http://ollama:11434`, then recreate:
 
 ```bash
 OLLAMA_CPU_LIMIT=6
@@ -67,6 +67,7 @@ curl -s http://localhost:8000/healthz
 
 Notes:
 - `spike-scanner` starts with the default stack.
+- With `OLLAMA_BASE_URL=http://host.docker.internal:11434`, the startup scripts do not start the dockerized `ollama` service.
 - Scanner health: `http://localhost:8091/healthz`
 - `pair-rotator` may take extra time on first start while it installs runtime tools.
 - `policy-pivot` writes adaptive runtime policy to `freqtrade/user_data/logs/llm-runtime-policy.json`.

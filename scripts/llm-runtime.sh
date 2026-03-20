@@ -3,30 +3,59 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-resolve_provider() {
-  if [[ -n "${LLM_PROVIDER:-}" ]]; then
-    printf '%s\n' "${LLM_PROVIDER}"
+read_env_value() {
+  local key="$1"
+  if [[ -n "${!key:-}" ]]; then
+    printf '%s\n' "${!key}"
     return
   fi
 
-  python3 - "${ROOT_DIR}/.env" <<'PY'
+  python3 - "${ROOT_DIR}/.env" "${key}" <<'PY'
 import sys
 from pathlib import Path
 
 env_path = Path(sys.argv[1])
-provider = ""
+target = sys.argv[2]
+value = ""
 if env_path.exists():
     for raw_line in env_path.read_text().splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-        key, value = line.split("=", 1)
-        if key.strip() != "LLM_PROVIDER":
+        key, candidate = line.split("=", 1)
+        if key.strip() != target:
             continue
-        provider = value.strip().strip('"').strip("'")
+        value = candidate.strip().strip('"').strip("'")
         break
-print(provider or "ollama")
+print(value)
 PY
+}
+
+resolve_provider() {
+  local provider
+  provider="$(read_env_value "LLM_PROVIDER")"
+  printf '%s\n' "${provider:-ollama}"
+}
+
+resolve_ollama_mode() {
+  local provider base_url normalized
+  provider="$(resolve_provider)"
+  provider="$(printf '%s' "${provider}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${provider}" != "ollama" ]]; then
+    printf '%s\n' "external"
+    return
+  fi
+
+  base_url="$(read_env_value "OLLAMA_BASE_URL")"
+  normalized="$(printf '%s' "${base_url:-http://ollama:11434}" | tr '[:upper:]' '[:lower:]')"
+  case "${normalized}" in
+    http://ollama:11434|https://ollama:11434|http://ollama|https://ollama)
+      printf '%s\n' "docker"
+      ;;
+    *)
+      printf '%s\n' "external"
+      ;;
+  esac
 }
 
 provider="$(resolve_provider)"
@@ -34,21 +63,25 @@ provider="$(printf '%s' "${provider}" | tr '[:upper:]' '[:lower:]')"
 if [[ "${provider}" != "openai_compatible" ]]; then
   provider="ollama"
 fi
+ollama_mode="$(resolve_ollama_mode)"
 
 command="${1:-provider}"
 case "${command}" in
   provider)
     printf '%s\n' "${provider}"
     ;;
+  ollama-mode)
+    printf '%s\n' "${ollama_mode}"
+    ;;
   services)
-    if [[ "${provider}" == "ollama" ]]; then
+    if [[ "${provider}" == "ollama" && "${ollama_mode}" == "docker" ]]; then
       printf '%s\n' "ollama bot-api spike-scanner"
     else
       printf '%s\n' "bot-api spike-scanner"
     fi
     ;;
   *)
-    echo "Usage: ./scripts/llm-runtime.sh [provider|services]" >&2
+    echo "Usage: ./scripts/llm-runtime.sh [provider|ollama-mode|services]" >&2
     exit 1
     ;;
 esac

@@ -50,6 +50,7 @@ USE_TOKEN_AUDIT_PREFILTER="${LLM_ROTATE_USE_TOKEN_AUDIT_PREFILTER:-}"
 TOKEN_AUDIT_BLOCK_LEVELS="${LLM_ROTATE_TOKEN_AUDIT_BLOCK_LEVELS:-}"
 TOKEN_AUDIT_FAIL_OPEN="${LLM_ROTATE_TOKEN_AUDIT_FAIL_OPEN:-}"
 EXCLUDED_BASES="${LLM_ROTATE_EXCLUDED_BASES:-}"
+EXCLUDED_PAIRS="${LLM_ROTATE_EXCLUDED_PAIRS:-}"
 MIN_ATR_PCT="${LLM_ROTATE_MIN_ATR_PCT:-}"
 MIN_ATR_PCT_AGGRESSIVE="${LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE:-}"
 ACTIVE_MIN_ATR_PCT=""
@@ -103,6 +104,7 @@ Notes:
   - Optional: set LLM_ROTATE_SMART_MONEY_FORCE_SLOT=true to guarantee at least one selected smart-money pair.
   - Optional: set LLM_ROTATE_SOURCE_DIVERSITY_ENABLED=true to reserve selected slots for Binance-skill, algo, and spike sources.
   - Optional: set LLM_ROTATE_MIN_ATR_PCT / LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE to reject low-volatility pairs before ranking.
+  - Optional: set LLM_ROTATE_EXCLUDED_PAIRS to hard-block specific symbols before ranking.
   - Optional: set LLM_ROTATE_OUTCOME_DB_PATH to track ranked-pair outcomes independently from executed trades.
 EOF
 }
@@ -791,6 +793,7 @@ USE_TOKEN_AUDIT_PREFILTER="${USE_TOKEN_AUDIT_PREFILTER:-true}"
 TOKEN_AUDIT_BLOCK_LEVELS="${TOKEN_AUDIT_BLOCK_LEVELS:-avoid}"
 TOKEN_AUDIT_FAIL_OPEN="${TOKEN_AUDIT_FAIL_OPEN:-true}"
 EXCLUDED_BASES="${EXCLUDED_BASES:-USDC USDT FDUSD TUSD USDP BUSD DAI EUR USD1}"
+EXCLUDED_PAIRS="${EXCLUDED_PAIRS:-}"
 MIN_ATR_PCT="${MIN_ATR_PCT:-0}"
 MIN_ATR_PCT_AGGRESSIVE="${MIN_ATR_PCT_AGGRESSIVE:-0.35}"
 ROTATION_OUTCOME_DB_PATH="${ROTATION_OUTCOME_DB_PATH:-${ROOT_DIR}/freqtrade/user_data/logs/rotation-outcomes.sqlite}"
@@ -959,6 +962,7 @@ metrics_json="$(
     -e ROTATE_WHITELIST_ONLY="${WHITELIST_ONLY}" \
     -e ROTATE_CORE_PAIRS="${core_pairs}" \
     -e ROTATE_EXCLUDED_BASES="${EXCLUDED_BASES}" \
+    -e ROTATE_EXCLUDED_PAIRS="${EXCLUDED_PAIRS}" \
     -e ROTATE_MIN_ATR_PCT="${ACTIVE_MIN_ATR_PCT}" \
     -e ROTATE_TIMEFRAME="${TIMEFRAME}" \
     -e ROTATE_LOOKBACK_CANDLES="${LOOKBACK_CANDLES}" \
@@ -1047,6 +1051,30 @@ def add_indicators(df):
     vol_std = out["volume"].rolling(20).std()
     out["volume_z"] = (out["volume"] - vol_ma20) / vol_std
     return out
+
+
+def resample_ohlcv(df, rule: str):
+    if df is None or df.empty or "date" not in df.columns:
+        return None
+    frame = df.copy()
+    try:
+        frame["date"] = pd.to_datetime(frame["date"], utc=True)
+    except Exception:
+        return None
+    frame = frame.sort_values("date")
+    frame = frame.set_index("date")
+    out = frame.resample(rule, label="right", closed="right").agg(
+        {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+    ).dropna()
+    if out.empty:
+        return None
+    return out.reset_index()
 
 
 def load_local_ohlcv(data_dir: Path, pair: str, timeframe: str, lookback: int):
@@ -1162,6 +1190,7 @@ min_atr_pct = float(os.getenv("ROTATE_MIN_ATR_PCT", "0") or "0")
 exclude_regex = str(os.getenv("ROTATE_EXCLUDE_REGEX", "")).strip()
 whitelist_only = as_bool(os.getenv("ROTATE_WHITELIST_ONLY", "false"), default=False)
 excluded_bases = {part.strip().upper() for part in os.getenv("ROTATE_EXCLUDED_BASES", "").replace(",", " ").split() if part.strip()}
+excluded_pairs = {part.strip().upper() for part in os.getenv("ROTATE_EXCLUDED_PAIRS", "").replace(",", " ").split() if part.strip()}
 timeframe = os.getenv("ROTATE_TIMEFRAME", "1h")
 lookback = int(os.getenv("ROTATE_LOOKBACK_CANDLES", "240"))
 config_path = Path(os.getenv("ROTATE_CONFIG_PATH", "/freqtrade/user_data/config.json"))
@@ -1176,6 +1205,7 @@ if config_path.exists():
         pair_whitelist = set()
 
 exchange = build_exchange(exchange_id)
+df_cache: dict[tuple[str, str], tuple[object, str]] = {}
 
 candidates = []
 candidate_sources: dict[str, set[str]] = {}
@@ -1247,19 +1277,27 @@ result = {
 
 
 def get_df(pair: str, tf: str, lb: int):
+    cache_key = (pair, tf)
+    if cache_key in df_cache:
+        return df_cache[cache_key]
+
     if data_source == "local":
         local_df = load_local_ohlcv(data_dir, pair, tf, lb)
-        return local_df, "local"
+        df_cache[cache_key] = (local_df, "local")
+        return df_cache[cache_key]
     if data_source == "exchange":
         ex_df = load_exchange_ohlcv(exchange, pair, tf, lb)
-        return ex_df, "exchange"
+        df_cache[cache_key] = (ex_df, "exchange")
+        return df_cache[cache_key]
 
     # auto mode
     local_df = load_local_ohlcv(data_dir, pair, tf, lb)
     if local_df is not None:
-        return local_df, "local"
+        df_cache[cache_key] = (local_df, "local")
+        return df_cache[cache_key]
     ex_df = load_exchange_ohlcv(exchange, pair, tf, lb)
-    return ex_df, "exchange"
+    df_cache[cache_key] = (ex_df, "exchange")
+    return df_cache[cache_key]
 
 
 for pair in ordered_candidates:
@@ -1294,14 +1332,22 @@ for pair in ordered_candidates:
         result["skipped"].append({"pair": pair, "reason": "invalid_indicator_values"})
         continue
     base = pair.split("/", 1)[0]
+    if pair in excluded_pairs:
+        result["skipped"].append({"pair": pair, "reason": "excluded_pair"})
+        continue
     if base in excluded_bases:
         result["skipped"].append({"pair": pair, "reason": "excluded_base"})
         continue
     if min_atr_pct > 0.0 and float(values["atr_pct"]) < min_atr_pct:
-        result["skipped"].append({"pair": pair, "reason": f"atr_below:{values['atr_pct']:.4f}<{min_atr_pct:.4f}"})
+        atr_pct_value = float(values["atr_pct"])
+        result["skipped"].append({"pair": pair, "reason": f"atr_below:{atr_pct_value:.4f}<{min_atr_pct:.4f}"})
         continue
 
-    info_raw, _ = get_df(pair, "4h", 220)
+    info_raw = None
+    if timeframe == "1h":
+        info_raw = resample_ohlcv(raw_df, "4h")
+    if info_raw is None or len(info_raw) < 220:
+        info_raw, _ = get_df(pair, "4h", 220)
     info_df = add_indicators(info_raw)
     trend_4h = "bearish"
     if info_df is not None and not info_df.empty:

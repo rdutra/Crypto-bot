@@ -1,4 +1,4 @@
-# Crypto Bot (Freqtrade + Ollama + Bot API)
+# Crypto Bot (Freqtrade + Bot API + Ollama/External LLM)
 
 Freqtrade executes trades, `bot-api` provides bounded LLM decisions, and the LLM backend can be either local Ollama or an external OpenAI-compatible API.
 
@@ -41,16 +41,22 @@ curl -s http://localhost:8000/healthz
 
 Important:
 - `spike-scanner` is part of the default stack.
-- `bootstrap.sh` starts `ollama` only when `LLM_PROVIDER=ollama`.
+- `bootstrap.sh` starts the dockerized `ollama` service only when `LLM_PROVIDER=ollama` and `OLLAMA_BASE_URL=http://ollama:11434`.
 - Scanner health is available at `http://localhost:8091/healthz`.
 
-6. Pull local model if you are using `LLM_PROVIDER=ollama`:
+6. If you are using host-installed Ollama, make sure it is running and the model is installed:
 
 ```bash
-docker compose exec -T ollama ollama pull llama3.1:8b
+ollama list
 ```
 
-Optional performance tuning for local Ollama (set in `.env`, then recreate `ollama`):
+If you are using the dockerized Ollama service instead, pull the model with:
+
+```bash
+docker compose exec -T ollama ollama pull qwen2.5:3b
+```
+
+Optional performance tuning for the dockerized Ollama service (set in `.env`, then recreate `ollama`):
 
 ```bash
 OLLAMA_CPU_LIMIT=6
@@ -286,7 +292,7 @@ Core strategy:
 - `ENABLE_LLM_FILTER=true|false`
 - `LLM_MIN_CONFIDENCE=0.65`
 - `LLM_CONNECT_TIMEOUT_SECONDS=2`
-- `LLM_READ_TIMEOUT_SECONDS=45` is only needed for slower local models like `qwen3:8b`
+- `LLM_READ_TIMEOUT_SECONDS=45` is mainly useful if local inference is still timing out
 - `LLM_PROVIDER=ollama|openai_compatible`
 - `LLM_BASE_URL=https://api.openai.com/v1` (used when `LLM_PROVIDER=openai_compatible`)
 - `LLM_API_KEY=...` (used when `LLM_PROVIDER=openai_compatible`)
@@ -297,6 +303,7 @@ Core strategy:
 - `LLM_OPENAI_MAX_COMPLETION_TOKENS=...` (optional)
 - `LLM_OPENAI_TEMPERATURE=0.1`
 - `OLLAMA_TIMEOUT=30` is the preferred fast-fail baseline for `bot-api` model calls
+- `OLLAMA_BASE_URL=http://host.docker.internal:11434` uses host-installed Ollama; set `http://ollama:11434` only if you want the dockerized Ollama service
 - `LLM_FAIL_OPEN=true` recommended in live/dry-run to avoid blocking entries when LLM is temporarily unavailable
 - `LLM_DEBUG_ENABLED=true`, `LLM_DEBUG_MAX_ENTRIES=250` (in-memory hot cache)
 - `LLM_DEBUG_DB_PATH=/app/data/llm-debug.sqlite`, `LLM_DEBUG_DB_MAX_ROWS=50000` (persistent debug history in sqlite)
@@ -430,7 +437,7 @@ Spike scanner:
 - `SPIKE_OUTCOME_BATCH_SIZE=200`
 - `SPIKE_LLM_SHADOW_ENABLED=false`
 - `SPIKE_LLM_SHADOW_BOT_API_URL=http://bot-api:8000`
-- `SPIKE_LLM_SHADOW_TIMEOUT_SECONDS=45` (only raise this if you intentionally run a slower model like `qwen3:8b`)
+- `SPIKE_LLM_SHADOW_TIMEOUT_SECONDS=45` (only raise this if local inference is still timing out)
 - `SPIKE_LLM_SHADOW_MIN_CONFIDENCE=0.65`
 - `SPIKE_LLM_SHADOW_ALLOWED_REGIMES=trend_pullback,breakout,mean_reversion`
 - `SPIKE_LLM_SHADOW_ALLOWED_RISK_LEVELS=low,medium`

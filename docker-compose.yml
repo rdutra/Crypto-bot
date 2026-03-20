@@ -42,8 +42,8 @@ services:
       LLM_OPENAI_RESPONSE_FORMAT_JSON: ${LLM_OPENAI_RESPONSE_FORMAT_JSON:-true}
       LLM_OPENAI_MAX_COMPLETION_TOKENS: ${LLM_OPENAI_MAX_COMPLETION_TOKENS:-}
       LLM_OPENAI_TEMPERATURE: ${LLM_OPENAI_TEMPERATURE:-0.1}
-      OLLAMA_BASE_URL: http://ollama:11434
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
       OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-90}
       BINANCE_REST_BASE: ${BINANCE_REST_BASE:-https://api.binance.com}
       BOT_API_ACCESS_LOG_ENABLED: ${BOT_API_ACCESS_LOG_ENABLED:-false}
@@ -91,9 +91,8 @@ services:
       LLM_ADDRESS_INFO_PATH: ${LLM_ADDRESS_INFO_PATH:-/bapi/defi/v3/public/wallet-direct/buw/wallet/address/pnl/active-position-list}
     ports:
       - "8000:8000"
-    depends_on:
-      ollama:
-        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./bot-api:/app
     restart: unless-stopped
@@ -201,8 +200,6 @@ services:
     restart: unless-stopped
     depends_on:
       bot-api:
-        condition: service_healthy
-      ollama:
         condition: service_healthy
     working_dir: /workspace
     environment:
