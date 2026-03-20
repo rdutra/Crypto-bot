@@ -162,6 +162,7 @@ services:
       FREQTRADE__API_SERVER__PASSWORD: ${FREQTRADE_API_PASSWORD:-}
     volumes:
       - ./freqtrade/user_data:/freqtrade/user_data
+      - ./scripts:/freqtrade/scripts:ro
     ports:
       - "${FREQTRADE_HOST_PORT:-18080}:8080"
     command: >
@@ -214,7 +215,7 @@ services:
       LLM_ROTATE_TOP_N: ${LLM_ROTATE_TOP_N:-6}
       LLM_ROTATE_MIN_CONFIDENCE: ${LLM_ROTATE_MIN_CONFIDENCE:-0.60}
       LLM_ROTATE_ALLOWED_RISK: ${LLM_ROTATE_ALLOWED_RISK:-low medium}
-      LLM_ROTATE_ALLOWED_REGIMES: ${LLM_ROTATE_ALLOWED_REGIMES:-trend_pullback breakout mean_reversion}
+      LLM_ROTATE_ALLOWED_REGIMES: ${LLM_ROTATE_ALLOWED_REGIMES:-trend_pullback}
       LLM_ROTATE_MAX_CANDIDATES: ${LLM_ROTATE_MAX_CANDIDATES:-20}
       LLM_ROTATE_MIN_QUOTE_VOLUME: ${LLM_ROTATE_MIN_QUOTE_VOLUME:-20000000}
       LLM_ROTATE_EXCLUDE_REGEX: ${LLM_ROTATE_EXCLUDE_REGEX:-}

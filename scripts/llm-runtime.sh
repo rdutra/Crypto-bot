@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SHELL_HELPER="${ROOT_DIR}/scripts/shell_helpers.py"
 
 read_env_value() {
   local key="$1"
@@ -10,25 +11,7 @@ read_env_value() {
     return
   fi
 
-  python3 - "${ROOT_DIR}/.env" "${key}" <<'PY'
-import sys
-from pathlib import Path
-
-env_path = Path(sys.argv[1])
-target = sys.argv[2]
-value = ""
-if env_path.exists():
-    for raw_line in env_path.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, candidate = line.split("=", 1)
-        if key.strip() != target:
-            continue
-        value = candidate.strip().strip('"').strip("'")
-        break
-print(value)
-PY
+  python3 "${SHELL_HELPER}" env-value "${ROOT_DIR}/.env" "${key}"
 }
 
 resolve_provider() {

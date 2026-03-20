@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_PATH="${ROOT_DIR}/freqtrade/user_data/config.json"
+SHELL_HELPER="${ROOT_DIR}/scripts/shell_helpers.py"
 MODE="${STRATEGY_MODE:-conservative}"
 ROTATE_RISK_PAIRS=false
 
@@ -48,21 +49,7 @@ if [[ "${MODE}" != "conservative" && "${MODE}" != "aggressive" ]]; then
   exit 1
 fi
 
-python3 - <<'PY' "${CONFIG_PATH}"
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-if not path.exists():
-    print(f"Missing config file: {path}", file=sys.stderr)
-    raise SystemExit(1)
-
-cfg = json.loads(path.read_text())
-if not cfg.get("dry_run", False):
-    print("Refusing to run: config has dry_run=false. Use run-live-watch.sh for real trading.", file=sys.stderr)
-    raise SystemExit(1)
-PY
+python3 "${SHELL_HELPER}" validate-config-mode "${CONFIG_PATH}" dry-run
 
 cd "${ROOT_DIR}"
 
@@ -78,23 +65,7 @@ if [[ "${ROTATE_RISK_PAIRS}" == "true" ]]; then
       rotate_log="${ROOT_DIR}/${rotate_log#./}"
     fi
     if [[ -f "${rotate_log}" ]]; then
-      python3 - "${rotate_log}" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-if not path.exists():
-    raise SystemExit(0)
-lines = [ln for ln in path.read_text().splitlines() if ln.strip()]
-if not lines:
-    raise SystemExit(0)
-last = json.loads(lines[-1])
-selected = " ".join(last.get("selected_pairs", [])) or "none"
-source = last.get("source", "unknown")
-reason = last.get("reason", "n/a")
-print(f"Rotation summary: source={source} reason={reason} selected={selected}")
-PY
+      python3 "${SHELL_HELPER}" summarize-rotation-log "${rotate_log}"
     fi
   else
     echo "Risk-pair rotation failed; continuing with current RISK_PAIRS."
