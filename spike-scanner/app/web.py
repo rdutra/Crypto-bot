@@ -38,6 +38,37 @@ def _fmt_num(value, digits: int = 4) -> str:
     return f"{float(value):.{digits}f}"
 
 
+def _normalize_utc_iso(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3,6}", text):
+            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S,%f").replace(tzinfo=timezone.utc)
+        else:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            else:
+                parsed = parsed.astimezone(timezone.utc)
+    except ValueError:
+        return ""
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _utc_time_html(value, fallback=None) -> str:
+    ts_iso = _normalize_utc_iso(value)
+    display = str(fallback if fallback is not None else value or "")
+    if not ts_iso:
+        return _esc(display)
+    escaped_iso = _esc(ts_iso)
+    text = _esc(display or ts_iso)
+    return (
+        f'<time class="js-local-ts" datetime="{escaped_iso}" data-utc-ts="{escaped_iso}" '
+        f'title="UTC {escaped_iso}">{text}</time>'
+    )
+
+
 def _clip_text(value, max_chars: int = 180) -> str:
     text = "" if value is None else str(value)
     if len(text) <= max_chars:
@@ -833,7 +864,7 @@ async def dashboard(request: web.Request) -> web.Response:
         [
             (
                 f"<tr><td>{int(row['id'])}</td>"
-                f"<td>{_esc(row.get('ts'))}</td>"
+                f"<td>{_utc_time_html(row.get('ts'))}</td>"
                 f"<td>{_esc(row.get('symbol'))}</td>"
                 f"<td>{_fmt_num(row.get('score'), 4)}</td>"
                 f"<td>{_fmt_num(row.get('entry_price'), 8)}</td>"
@@ -860,8 +891,8 @@ async def dashboard(request: web.Request) -> web.Response:
                 f"<td>{_fmt_pct(row.get('return_pct'))}</td>"
                 f"<td>{_esc(_fmt_llm_allowed(row.get('llm_allowed')))}</td>"
                 f"<td>{_fmt_num(row.get('llm_confidence'), 4)}</td>"
-                f"<td>{_esc(row.get('due_ts'))}</td>"
-                f"<td>{_esc(row.get('resolved_ts'))}</td></tr>"
+                f"<td>{_utc_time_html(row.get('due_ts'))}</td>"
+                f"<td>{_utc_time_html(row.get('resolved_ts'))}</td></tr>"
             )
             for row in outcomes
         ]
@@ -884,7 +915,7 @@ async def dashboard(request: web.Request) -> web.Response:
         [
             (
                 f"<tr><td>{int(row.get('id', 0))}</td>"
-                f"<td>{_esc(row.get('ts'))}</td>"
+                f"<td>{_utc_time_html(row.get('ts'))}</td>"
                 f"<td>{_esc(row.get('symbol'))}</td>"
                 f"<td>{_fmt_num(row.get('score'), 4)}</td>"
                 f"<td>{_fmt_num(row.get('spread_pct'), 4)}</td>"
@@ -905,9 +936,9 @@ async def dashboard(request: web.Request) -> web.Response:
     entry_diag_rows_html = "\n".join(
         [
             (
-                f"<tr><td>{_esc(row.get('ts'))}</td>"
+                f"<tr><td>{_utc_time_html(row.get('ts_iso'), row.get('ts'))}</td>"
                 f"<td>{_esc(row.get('pair'))}</td>"
-                f"<td>{_esc(row.get('candle'))}</td>"
+                f"<td>{_utc_time_html(row.get('candle'))}</td>"
                 f"<td>{_esc(row.get('status'))}</td>"
                 f"<td>{'yes' if int(row.get('base_ok') or 0) == 1 else 'no'}</td>"
                 f"<td>{'yes' if int(row.get('final_ok') or 0) == 1 else 'no'}</td>"
@@ -930,7 +961,7 @@ async def dashboard(request: web.Request) -> web.Response:
     llm_debug_rows_html = "\n".join(
         [
             (
-                f"<tr><td>{_esc(row.get('ts'))}</td>"
+                f"<tr><td>{_utc_time_html(row.get('ts'))}</td>"
                 f"<td>{_esc(row.get('endpoint'))}</td>"
                 f"<td>{_esc(row.get('model'))}</td>"
                 f"<td>{'yes' if bool(row.get('parsed_ok')) else 'no'}</td>"
@@ -944,7 +975,7 @@ async def dashboard(request: web.Request) -> web.Response:
     rotation_runs_rows_html = "\n".join(
         [
             (
-                f"<tr><td>{_esc(row.get('timestamp'))}</td>"
+                f"<tr><td>{_utc_time_html(row.get('timestamp'))}</td>"
                 f"<td>{_esc(row.get('event'))}</td>"
                 f"<td>{_esc(row.get('source'))}</td>"
                 f"<td>{_esc(row.get('reason'))}</td>"
@@ -974,7 +1005,7 @@ async def dashboard(request: web.Request) -> web.Response:
                 f"<td>{_esc(str(row.get('trading_signal_side') or ''))} {_fmt_num(row.get('trading_signal_score'), 2)}</td>"
                 f"<td>{_esc(_clip_text(row.get('reason'), 120))}</td>"
                 f"<td>{_esc(row.get('bot_status'))}</td>"
-                f"<td>{_esc(row.get('bot_candle'))}</td>"
+                f"<td>{_utc_time_html(row.get('bot_candle'))}</td>"
                 f"<td>{_esc(_clip_text(row.get('bot_failed'), 120))}</td></tr>"
             )
             for row in latest_rotation_pairs
@@ -983,7 +1014,7 @@ async def dashboard(request: web.Request) -> web.Response:
     latest_rotation_selected_pairs = latest_rotation_event.get("selected_pairs", []) if isinstance(latest_rotation_event, dict) else []
     latest_rotation_summary = (
         "Latest run: "
-        f"ts={_esc(latest_rotation_event.get('timestamp')) if latest_rotation_event else 'n/a'} | "
+        f"ts={_utc_time_html(latest_rotation_event.get('timestamp')) if latest_rotation_event else 'n/a'} | "
         f"source={_esc(latest_rotation_event.get('source')) if latest_rotation_event else 'n/a'} | "
         f"reason={_esc(latest_rotation_event.get('reason')) if latest_rotation_event else 'n/a'} | "
         f"candidates={int(latest_rotation_event.get('candidate_count', 0) or 0) if latest_rotation_event else 0} | "
@@ -1203,6 +1234,7 @@ async def dashboard(request: web.Request) -> web.Response:
 <body>
   <h1>Spike Scanner Dashboard</h1>
   <div class="muted">Predictions and realized outcomes (1h/4h/24h/48h by default).</div>
+  <div class="muted">Display timezone: <span id="client-timezone">detecting...</span> | Stored timestamps: UTC</div>
   <div class="toolbar">
     <div class="toolbar-top">
       <div class="toolbar-forms">
@@ -1374,22 +1406,100 @@ async def dashboard(request: web.Request) -> web.Response:
     (function () {{
       const buttons = Array.from(document.querySelectorAll('.tab-btn'));
       const panels = Array.from(document.querySelectorAll('.tab-panel'));
-      function activate(tabId, pushHash) {{
-        panels.forEach((panel) => panel.classList.toggle('active', panel.id === tabId));
-        buttons.forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === tabId));
-        if (pushHash) {{
-          history.replaceState(null, '', `${{location.pathname}}${{location.search}}#${{tabId}}`);
+      const validTabs = new Set(buttons.map((btn) => btn.dataset.tab).filter(Boolean));
+      function normalizedTab(tabId) {{
+        return validTabs.has(tabId) ? tabId : 'tab-overview';
+      }}
+      function tabUrl(tabId) {{
+        const nextTab = normalizedTab(tabId);
+        const url = new URL(window.location.href);
+        url.searchParams.set('tab', nextTab);
+        url.hash = `#${{nextTab}}`;
+        return url;
+      }}
+      function syncTabTargets(tabId) {{
+        const nextTab = normalizedTab(tabId);
+        document.querySelectorAll('a[href]').forEach((node) => {{
+          const href = node.getAttribute('href');
+          if (!href) {{
+            return;
+          }}
+          let url;
+          try {{
+            url = new URL(href, window.location.href);
+          }} catch (_err) {{
+            return;
+          }}
+          if (url.origin !== window.location.origin || url.pathname !== window.location.pathname) {{
+            return;
+          }}
+          url.searchParams.set('tab', nextTab);
+          node.setAttribute('href', `${{url.pathname}}${{url.search}}${{url.hash}}`);
+        }});
+        document.querySelectorAll('form[method=\"get\"]').forEach((form) => {{
+          let input = form.querySelector('input[name=\"tab\"]');
+          if (!input) {{
+            input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'tab';
+            form.appendChild(input);
+          }}
+          input.value = nextTab;
+        }});
+      }}
+      function activate(tabId, persist) {{
+        const nextTab = normalizedTab(tabId);
+        panels.forEach((panel) => panel.classList.toggle('active', panel.id === nextTab));
+        buttons.forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === nextTab));
+        syncTabTargets(nextTab);
+        try {{
+          window.localStorage.setItem('spike-scanner.active-tab', nextTab);
+        }} catch (_err) {{}}
+        if (persist) {{
+          const url = tabUrl(nextTab);
+          history.replaceState(null, '', `${{url.pathname}}${{url.search}}${{url.hash}}`);
         }}
       }}
       buttons.forEach((btn) => {{
         btn.addEventListener('click', () => activate(btn.dataset.tab, true));
       }});
+      let storedTab = '';
+      try {{
+        storedTab = window.localStorage.getItem('spike-scanner.active-tab') || '';
+      }} catch (_err) {{}}
+      const queryTab = new URLSearchParams(location.search).get('tab') || '';
       const hashTab = (location.hash || '').replace('#', '');
-      if (hashTab && document.getElementById(hashTab)) {{
-        activate(hashTab, false);
-      }} else {{
-        activate('tab-overview', false);
+      activate(queryTab || hashTab || storedTab || 'tab-overview', Boolean(queryTab || hashTab || storedTab));
+      window.addEventListener('popstate', () => {{
+        const nextQueryTab = new URLSearchParams(location.search).get('tab') || '';
+        const nextHashTab = (location.hash || '').replace('#', '');
+        activate(nextQueryTab || nextHashTab || 'tab-overview', false);
+      }});
+      const timezoneEl = document.getElementById('client-timezone');
+      const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local';
+      if (timezoneEl) {{
+        timezoneEl.textContent = browserTimeZone;
       }}
+      const formatter = new Intl.DateTimeFormat(undefined, {{
+        year: 'numeric',
+        month: 'short',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      }});
+      document.querySelectorAll('[data-utc-ts]').forEach((node) => {{
+        const raw = node.getAttribute('data-utc-ts');
+        if (!raw) {{
+          return;
+        }}
+        const parsed = new Date(raw);
+        if (Number.isNaN(parsed.getTime())) {{
+          return;
+        }}
+        node.textContent = formatter.format(parsed);
+        node.title = `UTC ${{raw}}`;
+      }});
     }})();
   </script>
 </body>

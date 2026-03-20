@@ -3,8 +3,6 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_PATH="${ROOT_DIR}/freqtrade/user_data/config.json"
-WATCH_SECONDS=30
-STOP_BELOW=""
 MODE="${STRATEGY_MODE:-conservative}"
 ROTATE_RISK_PAIRS=false
 
@@ -14,12 +12,8 @@ Usage:
   ./scripts/run-dry-watch.sh
   ./scripts/run-dry-watch.sh --mode aggressive
   ./scripts/run-dry-watch.sh --mode aggressive --rotate-risk-pairs
-  ./scripts/run-dry-watch.sh --watch 20
-  ./scripts/run-dry-watch.sh --watch 30 --stop-below 290 --mode conservative
 
 Options:
-  --watch SECONDS      Wallet refresh interval. Default: 30.
-  --stop-below VALUE   Auto-stop when bot wallet <= VALUE.
   --mode VALUE         Strategy profile: conservative|aggressive.
   --rotate-risk-pairs  Refresh RISK_PAIRS with LLM ranking before start.
   --help               Show help.
@@ -28,14 +22,6 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --watch)
-      WATCH_SECONDS="${2:-}"
-      shift 2
-      ;;
-    --stop-below)
-      STOP_BELOW="${2:-}"
-      shift 2
-      ;;
     --mode)
       MODE="${2:-}"
       shift 2
@@ -56,14 +42,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if ! [[ "${WATCH_SECONDS}" =~ ^[0-9]+$ ]]; then
-  echo "--watch must be an integer." >&2
-  exit 1
-fi
-if [[ -n "${STOP_BELOW}" ]] && ! [[ "${STOP_BELOW}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-  echo "--stop-below must be numeric." >&2
-  exit 1
-fi
 MODE="$(printf '%s' "${MODE}" | tr '[:upper:]' '[:lower:]')"
 if [[ "${MODE}" != "conservative" && "${MODE}" != "aggressive" ]]; then
   echo "--mode must be either conservative or aggressive." >&2
@@ -88,25 +66,12 @@ PY
 
 cd "${ROOT_DIR}"
 
-cleaned_up=false
-cleanup() {
-  if [[ "${cleaned_up}" == "true" ]]; then
-    return
-  fi
-  cleaned_up=true
-  echo ""
-  echo "Stopping freqtrade..."
-  WALLET_LOGIN_RETRIES=1 ./scripts/wallet-control.sh --stop >/dev/null 2>&1 || true
-  docker compose stop freqtrade >/dev/null 2>&1 || true
-}
-
-trap cleanup EXIT
-trap 'exit 130' INT TERM
+read -r -a llm_services <<<"$(./scripts/llm-runtime.sh services)"
 
 echo "Starting dry-run in ${MODE} mode..."
 if [[ "${ROTATE_RISK_PAIRS}" == "true" ]]; then
   echo "Rotating risk pairs (LLM advisor)..."
-  docker compose up -d ollama bot-api spike-scanner >/dev/null
+  docker compose up -d "${llm_services[@]}" >/dev/null
   if ./scripts/rotate-risk-pairs.sh --apply --mode "${MODE}"; then
     rotate_log="${LLM_ROTATE_LOG_PATH:-./freqtrade/user_data/logs/llm-pair-rotation.log}"
     if [[ "${rotate_log}" != /* ]]; then
@@ -135,11 +100,7 @@ PY
     echo "Risk-pair rotation failed; continuing with current RISK_PAIRS."
   fi
 fi
-STRATEGY_MODE="${MODE}" docker compose up -d ollama bot-api spike-scanner scheduler pair-rotator policy-pivot freqtrade
-
-wallet_cmd=(./scripts/wallet-control.sh --watch "${WATCH_SECONDS}")
-if [[ -n "${STOP_BELOW}" ]]; then
-  wallet_cmd+=(--stop-below "${STOP_BELOW}")
-fi
-
-"${wallet_cmd[@]}"
+STRATEGY_MODE="${MODE}" docker compose up -d "${llm_services[@]}" scheduler pair-rotator policy-pivot freqtrade
+docker compose ps
+echo "Dry-run stack started."
+echo "Follow logs with: docker compose logs -f --tail=100 bot-api spike-scanner scheduler pair-rotator policy-pivot freqtrade"

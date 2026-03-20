@@ -396,7 +396,7 @@ def main() -> int:
     enabled = _env_bool("LLM_POLICY_LOOP_ENABLED", False)
     interval_minutes = max(1, _safe_int(os.getenv("LLM_POLICY_INTERVAL_MINUTES", "15"), 15))
     lookback_hours = max(1.0, _safe_float(os.getenv("LLM_POLICY_LOOKBACK_HOURS", "24"), 24.0))
-    timeout_seconds = max(2.0, min(120.0, _safe_float(os.getenv("LLM_POLICY_HTTP_TIMEOUT_SECONDS", "20"), 20.0)))
+    timeout_seconds = max(2.0, min(120.0, _safe_float(os.getenv("LLM_POLICY_HTTP_TIMEOUT_SECONDS", "45"), 45.0)))
 
     bot_api_url = os.getenv("LLM_BOT_API_URL", "http://bot-api:8000").strip() or "http://bot-api:8000"
     trades_db_path = Path(

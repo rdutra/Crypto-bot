@@ -34,13 +34,14 @@ openssl rand -base64 24
 5. Build and start infra:
 
 ```bash
-docker compose up -d --build ollama bot-api spike-scanner
+./scripts/bootstrap.sh
 docker compose ps
 curl -s http://localhost:8000/healthz
 ```
 
 Important:
 - `spike-scanner` is part of the default stack.
+- `bootstrap.sh` starts `ollama` only when `LLM_PROVIDER=ollama`.
 - Scanner health is available at `http://localhost:8091/healthz`.
 
 6. Pull local model if you are using `LLM_PROVIDER=ollama`:
@@ -77,13 +78,13 @@ docker compose up -d --force-recreate bot-api
 Standard dry-run:
 
 ```bash
-./scripts/run-dry-watch.sh --watch 30 --mode conservative
+./scripts/run-dry-watch.sh --mode conservative
 ```
 
 Aggressive dry-run:
 
 ```bash
-./scripts/run-dry-watch.sh --watch 30 --mode aggressive
+./scripts/run-dry-watch.sh --mode aggressive
 ```
 
 After changing `.env` strategy values, recreate `freqtrade` to apply them:
@@ -95,13 +96,7 @@ docker compose up -d --force-recreate freqtrade scheduler pair-rotator policy-pi
 Dry-run with risk-pair rotation before startup:
 
 ```bash
-./scripts/run-dry-watch.sh --watch 30 --mode aggressive --rotate-risk-pairs
-```
-
-Auto-stop when wallet drops below threshold:
-
-```bash
-./scripts/run-dry-watch.sh --watch 30 --stop-below 290
+./scripts/run-dry-watch.sh --mode aggressive --rotate-risk-pairs
 ```
 
 ## 3) Backtesting
@@ -191,19 +186,19 @@ The log includes:
 2. Start live mode (confirmation required):
 
 ```bash
-./scripts/run-live-watch.sh --watch 30 --mode conservative
+./scripts/run-live-watch.sh --mode conservative
 ```
 
 Aggressive live mode:
 
 ```bash
-./scripts/run-live-watch.sh --watch 30 --mode aggressive
+./scripts/run-live-watch.sh --mode aggressive
 ```
 
 Live + risk-pair rotation before startup:
 
 ```bash
-./scripts/run-live-watch.sh --watch 30 --mode aggressive --rotate-risk-pairs
+./scripts/run-live-watch.sh --mode aggressive --rotate-risk-pairs
 ```
 
 ## 6) Useful Logs
@@ -214,11 +209,10 @@ Freqtrade + scheduler logs:
 docker compose logs -f --tail=200 freqtrade scheduler policy-pivot
 ```
 
-Wallet status / manual stop:
+Stack logs:
 
 ```bash
-./scripts/wallet-control.sh
-./scripts/wallet-control.sh --stop
+docker compose logs -f --tail=200 bot-api spike-scanner scheduler pair-rotator policy-pivot freqtrade
 ```
 
 ## 7) Spike Scanner Alerts
@@ -323,7 +317,7 @@ Core strategy:
 - `LLM_TRADING_SIGNAL_CHAIN_ID=56` and `LLM_TRADING_SIGNAL_USER_AGENT=binance-web3/1.0 (Skill)`
 - `LLM_TRADING_SIGNAL_ENDPOINTS=...` (comma-separated endpoint paths to probe)
 - `LLM_TRADING_SIGNAL_EXCLUDE_REGEX=...`
-- `LLM_RANK_SINGLE_MAX_OLLAMA_FAILURES=2` (if single-call recovery keeps hitting Ollama errors, fall back to deterministic ranking early)
+- `LLM_RANK_SINGLE_MAX_FAILURES=2` (if single-call recovery keeps hitting LLM provider errors, fall back to deterministic ranking early)
 - `CORE_PAIRS=...`
 - `RISK_PAIRS=...`
 - Keep `exchange.pair_whitelist` lean (usually `CORE_PAIRS + RISK_PAIRS`) to avoid slow analysis cycles and missed signals.
@@ -379,7 +373,12 @@ LLM rotation:
 - `LLM_ROTATE_SMART_MONEY_REQUIRE_BUY=true` (if true, only smart-money `buy` side candidates are used)
 - `LLM_ROTATE_SMART_MONEY_FORCE_REFRESH=false` (if true, bypass bot-api trading-signal cache on each rotation)
 - `LLM_ROTATE_SMART_MONEY_FORCE_SLOT=true` (if true, reserve at least one selected slot for the top smart-money candidate)
+- `LLM_ROTATE_EXCLUDED_BASES=USDC USDT FDUSD TUSD USDP BUSD DAI EUR USD1` (drop obvious low-opportunity bases from the risk basket)
+- `LLM_ROTATE_MIN_ATR_PCT=0` and `LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE=0.35` (reject low-ATR names before ranking; this keeps pairs like `USDC/USDT` out of aggressive rotation)
 - `LLM_ROTATE_LOG_PATH=./freqtrade/user_data/logs/llm-pair-rotation.log`
+- `LLM_ROTATE_OUTCOME_DB_PATH=./freqtrade/user_data/logs/rotation-outcomes.sqlite`
+- `LLM_ROTATE_OUTCOME_HORIZON_MINUTES=60`
+- `LLM_ROTATE_OUTCOME_SUCCESS_PCT=1.0` (used to classify selected/rejected rotation decisions into true/false positive/negative after the horizon passes)
 - `LLM_ROTATE_LOOP_INTERVAL_MINUTES=60` (used by `rotate-risk-pairs-loop.sh`)
 - `LLM_ROTATE_LOOP_JITTER_SECONDS=0` (optional random delay before each cycle)
 

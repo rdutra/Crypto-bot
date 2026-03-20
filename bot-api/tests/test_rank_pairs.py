@@ -67,7 +67,7 @@ class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
     async def test_rank_pairs_returns_extended_skill_meta_without_sell_penalty_by_default(self) -> None:
         req = bot_main.RankPairsRequest(candidates=[_sample_candidate()])
 
-        async def fake_run_ollama(_: str) -> str:
+        async def fake_run_llm(_: str) -> str:
             return json.dumps(
                 {
                     "decisions": [
@@ -100,7 +100,7 @@ class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 "upstream_errors": [],
             }
 
-        original_run_ollama = bot_main._run_ollama
+        original_run_llm = bot_main._run_llm
         original_market_loader = bot_main._load_market_rank_context
         original_signal_loader = bot_main._load_trading_signal_context
         original_market_enabled = bot_main.MARKET_RANK_SKILL_ENABLED
@@ -108,7 +108,7 @@ class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
         original_sell_penalty = bot_main.TRADING_SIGNAL_SELL_PENALTY_MULT
 
         try:
-            bot_main._run_ollama = fake_run_ollama
+            bot_main._run_llm = fake_run_llm
             bot_main._load_market_rank_context = fake_market_rank_context
             bot_main._load_trading_signal_context = fake_trading_signal_context
             bot_main.MARKET_RANK_SKILL_ENABLED = True
@@ -117,7 +117,7 @@ class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
             response = await bot_main.rank_pairs(req)
         finally:
-            bot_main._run_ollama = original_run_ollama
+            bot_main._run_llm = original_run_llm
             bot_main._load_market_rank_context = original_market_loader
             bot_main._load_trading_signal_context = original_signal_loader
             bot_main.MARKET_RANK_SKILL_ENABLED = original_market_enabled
@@ -174,6 +174,32 @@ class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(bot_main.HTTPException) as ctx:
             await bot_main.query_address_info(address="")
         self.assertEqual(ctx.exception.status_code, 400)
+
+    async def test_rank_pairs_fallback_confidence_is_calibrated_lower_than_llm(self) -> None:
+        req = bot_main.RankPairsRequest(candidates=[_sample_candidate(pair="CAKE/USDT", deterministic_score=8.1)])
+
+        async def fake_run_llm(_: str) -> str:
+            return "not-json"
+
+        async def fake_rank_via_single(_: bot_main.RankPairsRequest) -> tuple[dict[str, bot_main.LlmRankDecision], int]:
+            return {}, 0
+
+        original_run_llm = bot_main._run_llm
+        original_single = bot_main._rank_via_single_classify
+        try:
+            bot_main._run_llm = fake_run_llm
+            bot_main._rank_via_single_classify = fake_rank_via_single
+            response = await bot_main.rank_pairs(req)
+        finally:
+            bot_main._run_llm = original_run_llm
+            bot_main._rank_via_single_classify = original_single
+
+        self.assertEqual(response.source, "fallback")
+        self.assertEqual(response.reason, "single_classify_empty")
+        self.assertEqual(response.selected_pairs, ["CAKE/USDT"])
+        self.assertLess(response.decisions[0].confidence, 0.81)
+        self.assertLessEqual(response.decisions[0].confidence, bot_main.FALLBACK_CONFIDENCE_CAP)
+        self.assertIn("low_reliability", response.decisions[0].note)
 
 
 if __name__ == "__main__":

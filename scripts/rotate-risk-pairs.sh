@@ -49,6 +49,13 @@ TOKEN_INFO_FAIL_OPEN="${LLM_ROTATE_TOKEN_INFO_FAIL_OPEN:-}"
 USE_TOKEN_AUDIT_PREFILTER="${LLM_ROTATE_USE_TOKEN_AUDIT_PREFILTER:-}"
 TOKEN_AUDIT_BLOCK_LEVELS="${LLM_ROTATE_TOKEN_AUDIT_BLOCK_LEVELS:-}"
 TOKEN_AUDIT_FAIL_OPEN="${LLM_ROTATE_TOKEN_AUDIT_FAIL_OPEN:-}"
+EXCLUDED_BASES="${LLM_ROTATE_EXCLUDED_BASES:-}"
+MIN_ATR_PCT="${LLM_ROTATE_MIN_ATR_PCT:-}"
+MIN_ATR_PCT_AGGRESSIVE="${LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE:-}"
+ACTIVE_MIN_ATR_PCT=""
+ROTATION_OUTCOME_DB_PATH="${LLM_ROTATE_OUTCOME_DB_PATH:-}"
+ROTATION_OUTCOME_HORIZON_MINUTES="${LLM_ROTATE_OUTCOME_HORIZON_MINUTES:-}"
+ROTATION_OUTCOME_SUCCESS_PCT="${LLM_ROTATE_OUTCOME_SUCCESS_PCT:-}"
 MODE="${STRATEGY_MODE:-conservative}"
 APPLY=false
 RESTART=false
@@ -95,6 +102,8 @@ Notes:
   - Optional: set LLM_ROTATE_USE_SMART_MONEY_BIAS=true to prepend Binance-spot tradable smart-money pairs.
   - Optional: set LLM_ROTATE_SMART_MONEY_FORCE_SLOT=true to guarantee at least one selected smart-money pair.
   - Optional: set LLM_ROTATE_SOURCE_DIVERSITY_ENABLED=true to reserve selected slots for Binance-skill, algo, and spike sources.
+  - Optional: set LLM_ROTATE_MIN_ATR_PCT / LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE to reject low-volatility pairs before ranking.
+  - Optional: set LLM_ROTATE_OUTCOME_DB_PATH to track ranked-pair outcomes independently from executed trades.
 EOF
 }
 
@@ -738,6 +747,24 @@ fi
 if [[ -z "${TOKEN_AUDIT_FAIL_OPEN}" ]]; then
   TOKEN_AUDIT_FAIL_OPEN="$(get_env_file_value LLM_ROTATE_TOKEN_AUDIT_FAIL_OPEN || true)"
 fi
+if [[ -z "${EXCLUDED_BASES}" ]]; then
+  EXCLUDED_BASES="$(get_env_file_value LLM_ROTATE_EXCLUDED_BASES || true)"
+fi
+if [[ -z "${MIN_ATR_PCT}" ]]; then
+  MIN_ATR_PCT="$(get_env_file_value LLM_ROTATE_MIN_ATR_PCT || true)"
+fi
+if [[ -z "${MIN_ATR_PCT_AGGRESSIVE}" ]]; then
+  MIN_ATR_PCT_AGGRESSIVE="$(get_env_file_value LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE || true)"
+fi
+if [[ -z "${ROTATION_OUTCOME_DB_PATH}" ]]; then
+  ROTATION_OUTCOME_DB_PATH="$(get_env_file_value LLM_ROTATE_OUTCOME_DB_PATH || true)"
+fi
+if [[ -z "${ROTATION_OUTCOME_HORIZON_MINUTES}" ]]; then
+  ROTATION_OUTCOME_HORIZON_MINUTES="$(get_env_file_value LLM_ROTATE_OUTCOME_HORIZON_MINUTES || true)"
+fi
+if [[ -z "${ROTATION_OUTCOME_SUCCESS_PCT}" ]]; then
+  ROTATION_OUTCOME_SUCCESS_PCT="$(get_env_file_value LLM_ROTATE_OUTCOME_SUCCESS_PCT || true)"
+fi
 USE_SPIKE_BIAS="${USE_SPIKE_BIAS:-false}"
 SPIKE_DB_PATH="${SPIKE_DB_PATH:-${ROOT_DIR}/freqtrade/user_data/logs/spike-scanner.sqlite}"
 SPIKE_LOOKBACK_HOURS="${SPIKE_LOOKBACK_HOURS:-48}"
@@ -763,6 +790,12 @@ TOKEN_INFO_FAIL_OPEN="${TOKEN_INFO_FAIL_OPEN:-true}"
 USE_TOKEN_AUDIT_PREFILTER="${USE_TOKEN_AUDIT_PREFILTER:-true}"
 TOKEN_AUDIT_BLOCK_LEVELS="${TOKEN_AUDIT_BLOCK_LEVELS:-avoid}"
 TOKEN_AUDIT_FAIL_OPEN="${TOKEN_AUDIT_FAIL_OPEN:-true}"
+EXCLUDED_BASES="${EXCLUDED_BASES:-USDC USDT FDUSD TUSD USDP BUSD DAI EUR USD1}"
+MIN_ATR_PCT="${MIN_ATR_PCT:-0}"
+MIN_ATR_PCT_AGGRESSIVE="${MIN_ATR_PCT_AGGRESSIVE:-0.35}"
+ROTATION_OUTCOME_DB_PATH="${ROTATION_OUTCOME_DB_PATH:-${ROOT_DIR}/freqtrade/user_data/logs/rotation-outcomes.sqlite}"
+ROTATION_OUTCOME_HORIZON_MINUTES="${ROTATION_OUTCOME_HORIZON_MINUTES:-60}"
+ROTATION_OUTCOME_SUCCESS_PCT="${ROTATION_OUTCOME_SUCCESS_PCT:-1.0}"
 if ! [[ "${SPIKE_LOOKBACK_HOURS}" =~ ^[0-9]+$ ]]; then
   echo "LLM_ROTATE_SPIKE_LOOKBACK_HOURS must be an integer." >&2
   exit 1
@@ -807,6 +840,27 @@ if ! [[ "${TOKEN_INFO_MAX_TOP10_SHARE}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   echo "LLM_ROTATE_TOKEN_INFO_MAX_TOP10_SHARE must be numeric." >&2
   exit 1
 fi
+if ! [[ "${MIN_ATR_PCT}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "LLM_ROTATE_MIN_ATR_PCT must be numeric." >&2
+  exit 1
+fi
+if ! [[ "${MIN_ATR_PCT_AGGRESSIVE}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE must be numeric." >&2
+  exit 1
+fi
+if ! [[ "${ROTATION_OUTCOME_HORIZON_MINUTES}" =~ ^[0-9]+$ ]]; then
+  echo "LLM_ROTATE_OUTCOME_HORIZON_MINUTES must be an integer." >&2
+  exit 1
+fi
+if ! [[ "${ROTATION_OUTCOME_SUCCESS_PCT}" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+  echo "LLM_ROTATE_OUTCOME_SUCCESS_PCT must be numeric." >&2
+  exit 1
+fi
+if [[ "${MODE}" == "aggressive" ]]; then
+  ACTIVE_MIN_ATR_PCT="${MIN_ATR_PCT_AGGRESSIVE}"
+else
+  ACTIVE_MIN_ATR_PCT="${MIN_ATR_PCT}"
+fi
 if ! is_true "${AUTO_DISCOVER}"; then
   if [[ -z "${CANDIDATES}" ]]; then
     CANDIDATES="${current_risk_pairs}"
@@ -827,6 +881,9 @@ if [[ "${LOG_PATH}" != /* ]]; then
 fi
 if [[ "${SPIKE_DB_PATH}" != /* ]]; then
   SPIKE_DB_PATH="${ROOT_DIR}/${SPIKE_DB_PATH#./}"
+fi
+if [[ "${ROTATION_OUTCOME_DB_PATH}" != /* ]]; then
+  ROTATION_OUTCOME_DB_PATH="${ROOT_DIR}/${ROTATION_OUTCOME_DB_PATH#./}"
 fi
 
 mkdir -p "$(dirname "${LOG_PATH}")"
@@ -876,7 +933,8 @@ if ! is_true "${AUTO_DISCOVER}" && [[ -z "${CANDIDATES}" ]] && [[ -z "${SPIKE_BI
 fi
 
 if ! is_true "${ROTATE_SKIP_BOOTSTRAP_SERVICES:-false}"; then
-  docker compose up -d ollama bot-api spike-scanner >/dev/null
+  read -r -a llm_services <<<"$(./scripts/llm-runtime.sh services)"
+  docker compose up -d "${llm_services[@]}" >/dev/null
 fi
 
 echo "Preparing candidate metrics..."
@@ -900,6 +958,8 @@ metrics_json="$(
     -e ROTATE_EXCLUDE_REGEX="${EXCLUDE_REGEX}" \
     -e ROTATE_WHITELIST_ONLY="${WHITELIST_ONLY}" \
     -e ROTATE_CORE_PAIRS="${core_pairs}" \
+    -e ROTATE_EXCLUDED_BASES="${EXCLUDED_BASES}" \
+    -e ROTATE_MIN_ATR_PCT="${ACTIVE_MIN_ATR_PCT}" \
     -e ROTATE_TIMEFRAME="${TIMEFRAME}" \
     -e ROTATE_LOOKBACK_CANDLES="${LOOKBACK_CANDLES}" \
     -e ROTATE_CONFIG_PATH="/freqtrade/user_data/config.json" \
@@ -1064,6 +1124,9 @@ def discover_candidates(exchange, core_pairs, quote_asset, max_candidates, min_q
             continue
         if pair in core_pairs:
             continue
+        if base in excluded_bases:
+            skipped.append(f"excluded_base:{pair}")
+            continue
         if pattern and (pattern.search(pair) or pattern.search(base)):
             continue
 
@@ -1095,8 +1158,10 @@ exchange_id = str(os.getenv("ROTATE_EXCHANGE", "binance")).strip().lower()
 quote_asset = str(os.getenv("ROTATE_QUOTE", "USDT")).strip().upper()
 max_candidates = int(os.getenv("ROTATE_MAX_CANDIDATES", "20"))
 min_quote_volume = float(os.getenv("ROTATE_MIN_QUOTE_VOLUME", "20000000"))
+min_atr_pct = float(os.getenv("ROTATE_MIN_ATR_PCT", "0") or "0")
 exclude_regex = str(os.getenv("ROTATE_EXCLUDE_REGEX", "")).strip()
 whitelist_only = as_bool(os.getenv("ROTATE_WHITELIST_ONLY", "false"), default=False)
+excluded_bases = {part.strip().upper() for part in os.getenv("ROTATE_EXCLUDED_BASES", "").replace(",", " ").split() if part.strip()}
 timeframe = os.getenv("ROTATE_TIMEFRAME", "1h")
 lookback = int(os.getenv("ROTATE_LOOKBACK_CANDLES", "240"))
 config_path = Path(os.getenv("ROTATE_CONFIG_PATH", "/freqtrade/user_data/config.json"))
@@ -1228,6 +1293,13 @@ for pair in ordered_candidates:
     if any(v is None for v in values.values()):
         result["skipped"].append({"pair": pair, "reason": "invalid_indicator_values"})
         continue
+    base = pair.split("/", 1)[0]
+    if base in excluded_bases:
+        result["skipped"].append({"pair": pair, "reason": "excluded_base"})
+        continue
+    if min_atr_pct > 0.0 and float(values["atr_pct"]) < min_atr_pct:
+        result["skipped"].append({"pair": pair, "reason": f"atr_below:{values['atr_pct']:.4f}<{min_atr_pct:.4f}"})
+        continue
 
     info_raw, _ = get_df(pair, "4h", 220)
     info_df = add_indicators(info_raw)
@@ -1293,6 +1365,33 @@ metrics_json="$(
     "${TOKEN_AUDIT_BLOCK_LEVELS}" \
     "${TOKEN_AUDIT_FAIL_OPEN}"
 )"
+
+current_prices_json="$(
+  python3 - "${metrics_json}" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+prices = {}
+for item in payload.get("candidates", []):
+    if not isinstance(item, dict):
+        continue
+    pair = str(item.get("pair", "")).strip().upper()
+    price = item.get("price")
+    if pair and isinstance(price, (int, float)):
+        prices[pair] = float(price)
+print(json.dumps(prices, separators=(",", ":")))
+PY
+)"
+
+python3 "${ROOT_DIR}/scripts/rotation_outcomes.py" \
+  resolve \
+  --db-path "${ROTATION_OUTCOME_DB_PATH}" \
+  --exchange "${EXCHANGE_ID}" \
+  --rest-base-url "${BINANCE_REST_BASE_URL}" \
+  --success-pct "${ROTATION_OUTCOME_SUCCESS_PCT}" \
+  --limit 200 \
+  --current-prices-json "${current_prices_json}" >/dev/null || true
 
 candidate_count="$(
   python3 - "${metrics_json}" <<'PY'
@@ -1586,25 +1685,25 @@ if [[ "${selected_pairs}" != "${selected_pairs_before_force}" ]]; then
   echo "Applied source diversity enforcement -> selected=${selected_pairs}"
 fi
 
-python3 - "${metrics_json}" "${rank_response}" "${LOG_PATH}" "${TOP_N}" "${MIN_CONFIDENCE}" "${ALLOWED_RISK}" "${ALLOWED_REGIMES}" "${DATA_SOURCE}" "${AUTO_DISCOVER}" "${APPLY}" "${RESTART}" "${SYNC_WHITELIST}" "${MODE}" "${selected_pairs}" <<'PY'
+rotation_entry_json="$(
+python3 - "${metrics_json}" "${rank_response}" "${TOP_N}" "${MIN_CONFIDENCE}" "${ALLOWED_RISK}" "${ALLOWED_REGIMES}" "${DATA_SOURCE}" "${AUTO_DISCOVER}" "${APPLY}" "${RESTART}" "${SYNC_WHITELIST}" "${MODE}" "${selected_pairs}" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
 
 meta = json.loads(sys.argv[1])
 ranked = json.loads(sys.argv[2])
-log_path = sys.argv[3]
-top_n = int(sys.argv[4])
-min_conf = float(sys.argv[5])
-allowed_risk = [x.strip().lower() for x in sys.argv[6].replace(",", " ").split() if x.strip()]
-allowed_regimes = [x.strip().lower() for x in sys.argv[7].replace(",", " ").split() if x.strip()]
-data_source = sys.argv[8]
-auto_discover = str(sys.argv[9]).lower() in {"1", "true", "yes", "on"}
-apply_mode = str(sys.argv[10]).lower() in {"1", "true", "yes", "on"}
-restart_mode = str(sys.argv[11]).lower() in {"1", "true", "yes", "on"}
-sync_whitelist = str(sys.argv[12]).lower() in {"1", "true", "yes", "on"}
-mode = sys.argv[13]
-selected_pairs_override = [x.strip().upper() for x in str(sys.argv[14]).split() if x.strip()]
+top_n = int(sys.argv[3])
+min_conf = float(sys.argv[4])
+allowed_risk = [x.strip().lower() for x in sys.argv[5].replace(",", " ").split() if x.strip()]
+allowed_regimes = [x.strip().lower() for x in sys.argv[6].replace(",", " ").split() if x.strip()]
+data_source = sys.argv[7]
+auto_discover = str(sys.argv[8]).lower() in {"1", "true", "yes", "on"}
+apply_mode = str(sys.argv[9]).lower() in {"1", "true", "yes", "on"}
+restart_mode = str(sys.argv[10]).lower() in {"1", "true", "yes", "on"}
+sync_whitelist = str(sys.argv[11]).lower() in {"1", "true", "yes", "on"}
+mode = sys.argv[12]
+selected_pairs_override = [x.strip().upper() for x in str(sys.argv[13]).split() if x.strip()]
 
 sources = {
     item.get("pair"): item.get("data_source", "?")
@@ -1612,6 +1711,14 @@ sources = {
 }
 candidate_origins = {
     item.get("pair"): [str(x) for x in item.get("candidate_sources", []) if str(x).strip()]
+    for item in meta.get("candidates", [])
+}
+candidate_prices = {
+    item.get("pair"): item.get("price")
+    for item in meta.get("candidates", [])
+}
+candidate_atr_pct = {
+    item.get("pair"): item.get("atr_pct")
     for item in meta.get("candidates", [])
 }
 selected_set = set(selected_pairs_override or [str(x).upper() for x in ranked.get("selected_pairs", []) if str(x).strip()])
@@ -1670,6 +1777,8 @@ for item in ranked.get("decisions", []):
             "trading_signal_side": item.get("trading_signal_side"),
             "trading_signal_score": item.get("trading_signal_score"),
             "final_score": final_score_value,
+            "price": candidate_prices.get(pair),
+            "atr_pct": candidate_atr_pct.get(pair),
             "note": item.get("note"),
             "selected": selected,
             "selection_status": selection_status,
@@ -1730,10 +1839,15 @@ entry = {
     "skipped": meta.get("skipped", []),
     "decisions": decisions,
 }
-
-with open(log_path, "a", encoding="utf-8") as f:
-    f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+print(json.dumps(entry, separators=(",", ":")))
 PY
+)"
+printf '%s\n' "${rotation_entry_json}" >> "${LOG_PATH}"
+python3 "${ROOT_DIR}/scripts/rotation_outcomes.py" \
+  record \
+  --db-path "${ROTATION_OUTCOME_DB_PATH}" \
+  --horizon-minutes "${ROTATION_OUTCOME_HORIZON_MINUTES}" \
+  --event-json "${rotation_entry_json}" >/dev/null || true
 echo "Rotation log appended: ${LOG_PATH}"
 
 if [[ -z "${selected_pairs}" ]]; then

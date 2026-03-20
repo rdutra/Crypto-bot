@@ -27,14 +27,16 @@ if [[ "${MODE}" != "conservative" && "${MODE}" != "aggressive" ]]; then
   exit 1
 fi
 
+read -r -a llm_services <<<"$(./scripts/llm-runtime.sh services)"
+
 echo "Starting dry-run in ${MODE} mode..."
 if [[ "${ROTATE_RISK_PAIRS}" == "true" ]]; then
   echo "Rotating risk pairs (LLM advisor)..."
-  docker compose up -d ollama bot-api spike-scanner >/dev/null
+  docker compose up -d "${llm_services[@]}" >/dev/null
   if ! ./scripts/rotate-risk-pairs.sh --apply --mode "${MODE}"; then
     echo "Risk-pair rotation failed; continuing with current RISK_PAIRS."
   fi
 fi
-STRATEGY_MODE="${MODE}" docker compose up -d bot-api spike-scanner freqtrade scheduler pair-rotator policy-pivot
+STRATEGY_MODE="${MODE}" docker compose up -d "${llm_services[@]}" freqtrade scheduler pair-rotator policy-pivot
 
 docker compose logs -f --tail=100 freqtrade scheduler pair-rotator policy-pivot spike-scanner

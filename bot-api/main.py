@@ -66,6 +66,10 @@ MARKET_RANK_QUOTE = SKILL_SERVICE.settings.market_rank_quote
 TRADING_SIGNAL_QUOTE = SKILL_SERVICE.settings.trading_signal_quote
 TRADING_SIGNAL_BUY_BONUS_MULT = float(os.getenv("LLM_TRADING_SIGNAL_BUY_BONUS_MULT", "0.9"))
 TRADING_SIGNAL_SELL_PENALTY_MULT = float(os.getenv("LLM_TRADING_SIGNAL_SELL_PENALTY_MULT", "0.0"))
+FALLBACK_CONFIDENCE_SCALE = max(8.0, float(os.getenv("LLM_FALLBACK_CONFIDENCE_SCALE", "13.5") or "13.5"))
+FALLBACK_CONFIDENCE_CAP = min(0.95, max(0.2, float(os.getenv("LLM_FALLBACK_CONFIDENCE_CAP", "0.72") or "0.72")))
+FALLBACK_SMART_BUY_BASE = min(0.95, max(0.0, float(os.getenv("LLM_FALLBACK_SMART_BUY_BASE", "0.52") or "0.52")))
+FALLBACK_SMART_BUY_MULT = min(0.5, max(0.0, float(os.getenv("LLM_FALLBACK_SMART_BUY_MULT", "0.15") or "0.15")))
 
 LLM_DEBUG_ENABLED = str(os.getenv("LLM_DEBUG_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
 LLM_DEBUG_MAX_ENTRIES = max(20, min(2000, int(os.getenv("LLM_DEBUG_MAX_ENTRIES", "250") or "250")))
@@ -151,6 +155,14 @@ def _clip_text(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return f"{value[:limit]}...[truncated]"
+
+
+def _format_llm_exception(exc: Exception) -> str:
+    name = type(exc).__name__
+    detail = str(exc).strip()
+    if not detail or detail == name:
+        return name
+    return f"{name}:{detail}"
 
 
 def _record_llm_call(
@@ -357,10 +369,10 @@ def _rank_fallback(
         else:
             regime = "no_trade"
         risk_level: RiskLiteral = "medium" if tradable else "high"
-        confidence = min(0.95, max(0.0, candidate.deterministic_score / 10.0))
+        confidence = min(FALLBACK_CONFIDENCE_CAP, max(0.0, candidate.deterministic_score / FALLBACK_CONFIDENCE_SCALE))
         if smart_buy:
-            confidence = max(confidence, min(0.95, 0.60 + (trading_signal_score * 0.35)))
-        note = "fallback_det_rank_smart_buy" if smart_buy and not trendish else "fallback_det_rank"
+            confidence = max(confidence, min(FALLBACK_CONFIDENCE_CAP, FALLBACK_SMART_BUY_BASE + (trading_signal_score * FALLBACK_SMART_BUY_MULT)))
+        note = "fallback_det_rank_smart_buy_low_reliability" if smart_buy and not trendish else "fallback_det_rank_low_reliability"
         parsed[key] = LlmRankDecision(
             pair=candidate.pair,
             regime=regime,
@@ -453,27 +465,32 @@ def _policy_fallback(req: RuntimePolicyRequest, reason: str) -> RuntimePolicyDec
 async def _rank_via_single_classify(req: RankPairsRequest) -> tuple[Dict[str, LlmRankDecision], int]:
     parsed: Dict[str, LlmRankDecision] = {}
     success_count = 0
-    ollama_failure_count = 0
-    max_ollama_failures = _env_int("LLM_RANK_SINGLE_MAX_OLLAMA_FAILURES", 2, 1, 10)
+    provider_failure_count = 0
+    max_provider_failures = _env_int(
+        "LLM_RANK_SINGLE_MAX_FAILURES",
+        _env_int("LLM_RANK_SINGLE_MAX_OLLAMA_FAILURES", 2, 1, 10),
+        1,
+        10,
+    )
 
     for candidate in req.candidates:
         single_req = _to_regime_request(candidate)
         prompt = build_regime_prompt(single_req)
         raw_text = ""
         try:
-            raw_text = await _run_ollama(prompt)
+            raw_text = await _run_llm(prompt)
             decision = parse_regime_output(raw_text)
         except Exception as exc:
             decision = None
-            ollama_failure_count += 1
+            provider_failure_count += 1
             _record_llm_call(
                 endpoint="rank-pairs-single",
                 prompt=prompt,
                 raw_response=raw_text,
                 parsed_ok=False,
-                error=f"ollama_error:{exc}",
+                error=f"llm_error:{_format_llm_exception(exc)}",
             )
-            if ollama_failure_count >= max_ollama_failures and success_count == 0:
+            if provider_failure_count >= max_provider_failures and success_count == 0:
                 return {}, 0
 
         if decision is None:
@@ -507,9 +524,13 @@ async def _rank_via_single_classify(req: RankPairsRequest) -> tuple[Dict[str, Ll
 
     return parsed, success_count
 
-
-async def _run_ollama(prompt: str) -> str:
+async def _run_llm(prompt: str) -> str:
     return await LLM_CLIENT.run(prompt)
+
+
+# Compatibility wrapper for older tests/integrations.
+async def _run_ollama(prompt: str) -> str:
+    return await _run_llm(prompt)
 
 
 @app.get("/healthz")
@@ -603,16 +624,16 @@ async def classify(req: RegimeRequest) -> RegimeDecision:
     prompt = build_regime_prompt(req)
     raw_text = ""
     try:
-        raw_text = await _run_ollama(prompt)
+        raw_text = await _run_llm(prompt)
     except Exception as exc:
         _record_llm_call(
             endpoint="classify",
             prompt=prompt,
             raw_response=raw_text,
             parsed_ok=False,
-            error=f"ollama_unavailable:{exc}",
+            error=f"llm_unavailable:{_format_llm_exception(exc)}",
         )
-        return _fallback("ollama_unavailable")
+        return _fallback("llm_unavailable")
 
     decision = parse_regime_output(raw_text)
     if decision is None:
@@ -650,17 +671,17 @@ async def rank_pairs(req: RankPairsRequest) -> RankPairsResponse:
     parse_reason = "batch_ok"
 
     try:
-        raw_text = await _run_ollama(prompt)
+        raw_text = await _run_llm(prompt)
         parsed = parse_rank_output(raw_text)
     except Exception as exc:
         parsed = None
-        parse_reason = "batch_ollama_error"
+        parse_reason = "batch_llm_error"
         _record_llm_call(
             endpoint="rank-pairs-batch",
             prompt=prompt,
             raw_response=raw_text,
             parsed_ok=False,
-            error=f"ollama_error:{exc}",
+            error=f"llm_error:{_format_llm_exception(exc)}",
         )
 
     if raw_text and parsed is not None:
@@ -719,7 +740,7 @@ async def policy(req: RuntimePolicyRequest) -> RuntimePolicyDecision:
     prompt = build_policy_prompt(req)
     raw_text = ""
     try:
-        raw_text = await _run_ollama(prompt)
+        raw_text = await _run_llm(prompt)
         parsed = parse_policy_output(raw_text)
         if parsed is None:
             logger.warning("policy fallback: invalid_model_output")
@@ -736,15 +757,15 @@ async def policy(req: RuntimePolicyRequest) -> RuntimePolicyDecision:
         parsed.reason = "llm_ok"
         return parsed
     except Exception as exc:
-        logger.warning("policy fallback: ollama_unavailable")
+        logger.warning("policy fallback: llm_unavailable")
         _record_llm_call(
             endpoint="policy",
             prompt=prompt,
             raw_response=raw_text,
             parsed_ok=False,
-            error=f"ollama_unavailable:{exc}",
+            error=f"llm_unavailable:{_format_llm_exception(exc)}",
         )
-        return _policy_fallback(req, reason="ollama_unavailable")
+        return _policy_fallback(req, reason="llm_unavailable")
 
 
 @app.get("/debug/llm-calls")

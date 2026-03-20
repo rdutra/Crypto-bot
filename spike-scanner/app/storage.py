@@ -125,17 +125,40 @@ class PredictionStore:
         return datetime.now(timezone.utc)
 
     @staticmethod
-    def _iso(dt: datetime) -> str:
-        return dt.isoformat()
+    def _normalize_utc(dt: datetime) -> datetime:
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    @classmethod
+    def _iso(cls, dt: datetime) -> str:
+        return cls._normalize_utc(dt).isoformat()
+
+    @classmethod
+    def _from_iso(cls, value: str) -> datetime:
+        parsed = datetime.fromisoformat(value)
+        return cls._normalize_utc(parsed)
+
+    @classmethod
+    def _normalize_ts_value(cls, value: Any) -> str:
+        if isinstance(value, datetime):
+            return cls._iso(value)
+        return cls._from_iso(str(value)).isoformat()
 
     @staticmethod
-    def _from_iso(value: str) -> datetime:
-        return datetime.fromisoformat(value)
+    def _as_utc_iso_or_now(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return PredictionStore._iso(PredictionStore._utc_now())
+        try:
+            return PredictionStore._normalize_ts_value(text)
+        except Exception:
+            return PredictionStore._iso(PredictionStore._utc_now())
 
     def write_prediction(self, payload: dict) -> int:
         payload = dict(payload)
         now = self._utc_now()
-        ts = self._iso(now)
+        ts = self._as_utc_iso_or_now(payload.get("ts"))
         payload["ts"] = ts
 
         with open(self.jsonl_path, "a", encoding="utf-8") as f:
@@ -245,9 +268,7 @@ class PredictionStore:
 
     def write_llm_shadow_eval(self, payload: dict) -> int:
         payload = dict(payload)
-        ts = payload.get("ts")
-        if not ts:
-            ts = self._iso(self._utc_now())
+        ts = self._as_utc_iso_or_now(payload.get("ts"))
 
         symbol = str(payload.get("symbol", "")).upper()
         score = float(payload.get("score", 0.0))
