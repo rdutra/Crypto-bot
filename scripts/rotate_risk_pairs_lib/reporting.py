@@ -79,9 +79,6 @@ def log_no_candidates(args: argparse.Namespace) -> int:
 
 def build_rank_request(args: argparse.Namespace) -> int:
     payload = json.loads(args.metrics_json)
-    for item in payload.get("candidates", []):
-        item.pop("data_source", None)
-        item.pop("candidate_sources", None)
     body = {
         "candidates": payload["candidates"],
         "top_n": args.top_n,
@@ -158,6 +155,25 @@ def selected_pairs(args: argparse.Namespace) -> int:
 
 
 
+def selected_source_pairs(args: argparse.Namespace) -> int:
+    payload = json.loads(args.rotation_entry_json)
+    target_source = str(args.source or "").strip().lower()
+    pairs: list[str] = []
+    for row in payload.get("decisions", []):
+        if not isinstance(row, dict):
+            continue
+        if not bool(row.get("selected")):
+            continue
+        sources = {str(item).strip().lower() for item in row.get("candidate_sources", []) if str(item).strip()}
+        if target_source and target_source not in sources:
+            continue
+        pair = str(row.get("pair", "")).strip().upper()
+        if pair:
+            pairs.append(pair)
+    print(" ".join(pairs))
+    return 0
+
+
 def enforce_source_diversity(args: argparse.Namespace) -> int:
     ranked = json.loads(args.rank_response)
     meta = json.loads(args.metrics_json)
@@ -183,6 +199,12 @@ def enforce_source_diversity(args: argparse.Namespace) -> int:
         if allowed_risk and risk_level and risk_level not in allowed_risk:
             continue
         eligible_pairs.add(pair)
+
+    confidence_by_pair = {
+        str(item.get("pair", "")).upper(): float(item.get("confidence") or 0.0)
+        for item in ranked.get("decisions", [])
+        if str(item.get("pair", "")).strip()
+    }
 
     ranked_order: list[str] = []
     seen: set[str] = set()
@@ -210,6 +232,18 @@ def enforce_source_diversity(args: argparse.Namespace) -> int:
 
     selected: list[str] = []
     selected_set: set[str] = set()
+
+    if args.reserve_spike_slot and args.top_n > 0:
+        for pair in ranked_order:
+            if pair not in eligible_pairs:
+                continue
+            if "spike" not in origins_by_pair.get(pair, set()):
+                continue
+            if confidence_by_pair.get(pair, 0.0) < args.reserve_spike_min_confidence:
+                continue
+            selected.append(pair)
+            selected_set.add(pair)
+            break
 
     def try_pick(source_name: str, quota: int) -> None:
         if quota <= 0:

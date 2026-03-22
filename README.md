@@ -101,8 +101,9 @@ docker compose up -d --force-recreate freqtrade scheduler pair-rotator policy-pi
 
 Strategy selection:
 
-- `FREQTRADE_STRATEGY=LlmRotationAlignedStrategy` is the current default and matches the higher-risk / mean-reversion rotator output more closely
+- `FREQTRADE_STRATEGY=LlmHybridStrategy` is the current default and keeps one bot while giving spike-tagged pairs a dedicated execution branch
 - `FREQTRADE_STRATEGY=LlmTrendPullbackStrategy` keeps the stricter trend-following execution logic if you want the conservative baseline
+- `FREQTRADE_STRATEGY=LlmRotationAlignedStrategy` remains available if you want the older single-path aggressive profile
 
 Dry-run with risk-pair rotation before startup:
 
@@ -294,7 +295,7 @@ Notes:
 Core strategy:
 
 - `STRATEGY_MODE=conservative|aggressive`
-- `FREQTRADE_STRATEGY=LlmTrendPullbackStrategy|LlmRotationAlignedStrategy`
+- `FREQTRADE_STRATEGY=LlmTrendPullbackStrategy|LlmRotationAlignedStrategy|LlmHybridStrategy`
 - `ENABLE_LLM_FILTER=true|false`
 - `LLM_MIN_CONFIDENCE=0.65`
 - `LLM_CONNECT_TIMEOUT_SECONDS=2`
@@ -370,13 +371,15 @@ LLM rotation:
 - `LLM_ROTATE_MIN_CONFIDENCE=0.60`
 - `LLM_ROTATE_ALLOWED_RISK=low medium high`
 - `LLM_ROTATE_ALLOWED_REGIMES=trend_pullback breakout mean_reversion`
-- `LLM_ROTATE_MAX_EXCHANGE_FALLBACKS=6`
+- `LLM_ROTATE_MAX_EXCHANGE_FALLBACKS=10`
 - `LLM_ROTATE_EXCHANGE_TIMEOUT_MS=8000`
 - `LLM_ROTATE_SYNC_WHITELIST=true`
 - `LLM_ROTATE_SOURCE_DIVERSITY_ENABLED=true` (reserve part of the final basket for Binance-skill, algo, and spike sources)
 - `LLM_ROTATE_MIN_BINANCE_SKILL_PAIRS=2`
 - `LLM_ROTATE_MIN_ALGO_PAIRS=2`
 - `LLM_ROTATE_MIN_SPIKE_PAIRS=1`
+- `LLM_ROTATE_RESERVE_SPIKE_SLOT=false`
+- `LLM_ROTATE_RESERVE_SPIKE_MIN_CONFIDENCE=0.80`
 - `LLM_ROTATE_USE_SPIKE_BIAS=true|false` (prepend recent high-score scanner symbols into rotation candidates)
 - `LLM_ROTATE_SPIKE_DB_URL=postgresql+psycopg2://stack:stack@stack-postgres:5432/spike_scanner` (preferred)
 - `LLM_ROTATE_SPIKE_DB_PATH=./freqtrade/user_data/logs/spike-scanner.sqlite` (SQLite fallback / migration source)

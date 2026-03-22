@@ -64,6 +64,32 @@ class TradingSignalParsingTests(unittest.TestCase):
 
 
 class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
+    def test_build_rank_prompt_keeps_candidate_source_tags(self) -> None:
+        req = bot_main.RankPairsRequest(
+            candidates=[
+                bot_main.PairCandidate(
+                    pair="WLD/USDT",
+                    timeframe="1h",
+                    price=1.0,
+                    ema_20=0.98,
+                    ema_50=0.95,
+                    ema_200=0.9,
+                    rsi_14=58.0,
+                    adx_14=18.0,
+                    atr_pct=2.4,
+                    volume_zscore=1.1,
+                    trend_4h="bearish",
+                    market_structure="mixed",
+                    deterministic_score=6.5,
+                    data_source="exchange",
+                    candidate_sources=["spike"],
+                )
+            ]
+        )
+        prompt = bot_main.build_rank_prompt(req)
+        self.assertIn('"candidate_sources":["spike"]', prompt)
+        self.assertIn("scanner-detected momentum candidate", prompt)
+
     async def test_rank_pairs_returns_extended_skill_meta_without_sell_penalty_by_default(self) -> None:
         req = bot_main.RankPairsRequest(candidates=[_sample_candidate()])
 

@@ -89,7 +89,7 @@ Dry-run (aggressive):
 Dry-run (aggressive, rotation-aligned strategy):
 
 ```bash
-FREQTRADE_STRATEGY=LlmRotationAlignedStrategy ./scripts/run-dry-watch.sh --mode aggressive
+FREQTRADE_STRATEGY=LlmHybridStrategy ./scripts/run-dry-watch.sh --mode aggressive
 ```
 
 Dry-run + LLM risk-pair rotation before startup:
@@ -98,7 +98,7 @@ Dry-run + LLM risk-pair rotation before startup:
 ./scripts/run-dry-watch.sh --mode aggressive --rotate-risk-pairs
 ```
 
-Current defaults already assume `LlmRotationAlignedStrategy`, `LLM_ROTATE_ALLOWED_RISK=low medium high`, and `LLM_ROTATE_ALLOWED_REGIMES=trend_pullback breakout mean_reversion`.
+Current defaults already assume `LlmHybridStrategy`, `LLM_ROTATE_ALLOWED_RISK=low medium high`, and `LLM_ROTATE_ALLOWED_REGIMES=trend_pullback breakout mean_reversion`.
 
 Live trading (only when `dry_run=false`):
 

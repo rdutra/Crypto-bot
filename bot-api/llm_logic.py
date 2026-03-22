@@ -113,6 +113,8 @@ def build_rank_prompt(
         compact_candidates.append(
             {
                 "pair": candidate.pair,
+                "data_source": candidate.data_source,
+                "candidate_sources": candidate.candidate_sources,
                 "timeframe": candidate.timeframe,
                 "price": candidate.price,
                 "ema_20": candidate.ema_20,
@@ -146,6 +148,10 @@ def build_rank_prompt(
         "- Keep one decision per input pair.\n"
         "- confidence must be between 0 and 1.\n"
         "- Prefer trend_pullback when trend and pullback metrics align.\n"
+        "- candidate_sources can include spike, algo, or binance_skill.\n"
+        "- If candidate_sources includes spike, evaluate it as a scanner-detected momentum candidate.\n"
+        "- For spike candidates, breakout or mean_reversion with high risk is acceptable when ATR/volume are strong, even if the 4h trend is mixed or weak.\n"
+        "- Do not default a spike candidate to no_trade solely because the higher timeframe trend is not cleanly bullish.\n"
         "- market_rank_score is a secondary prior from Binance market ranks (0..1).\n"
         "- trading_signal_side/score is an extra prior from Binance trading-signal skill.\n"
         "- If uncertain, use no_trade with high risk.\n"

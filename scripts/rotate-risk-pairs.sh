@@ -42,6 +42,8 @@ SOURCE_DIVERSITY_ENABLED="${LLM_ROTATE_SOURCE_DIVERSITY_ENABLED:-}"
 MIN_BINANCE_SKILL_PAIRS="${LLM_ROTATE_MIN_BINANCE_SKILL_PAIRS:-}"
 MIN_ALGO_PAIRS="${LLM_ROTATE_MIN_ALGO_PAIRS:-}"
 MIN_SPIKE_PAIRS="${LLM_ROTATE_MIN_SPIKE_PAIRS:-}"
+RESERVE_SPIKE_SLOT="${LLM_ROTATE_RESERVE_SPIKE_SLOT:-}"
+RESERVE_SPIKE_MIN_CONFIDENCE="${LLM_ROTATE_RESERVE_SPIKE_MIN_CONFIDENCE:-}"
 USE_TOKEN_INFO_PREFILTER="${LLM_ROTATE_USE_TOKEN_INFO_PREFILTER:-}"
 TOKEN_INFO_MIN_LIQUIDITY_USD="${LLM_ROTATE_TOKEN_INFO_MIN_LIQUIDITY_USD:-}"
 TOKEN_INFO_MIN_HOLDERS="${LLM_ROTATE_TOKEN_INFO_MIN_HOLDERS:-}"
@@ -378,6 +380,11 @@ if [[ -z "${current_risk_pairs}" ]]; then
   current_risk_pairs="$(get_env_file_value RISK_PAIRS || true)"
 fi
 
+current_spike_pairs="${SPIKE_PAIRS:-}"
+if [[ -z "${current_spike_pairs}" ]]; then
+  current_spike_pairs="$(get_env_file_value SPIKE_PAIRS || true)"
+fi
+
 if [[ -z "${CANDIDATES}" ]]; then
   CANDIDATES="$(get_env_file_value LLM_ROTATE_CANDIDATES || true)"
 fi
@@ -435,6 +442,12 @@ if [[ -z "${MIN_ALGO_PAIRS}" ]]; then
 fi
 if [[ -z "${MIN_SPIKE_PAIRS}" ]]; then
   MIN_SPIKE_PAIRS="$(get_env_file_value LLM_ROTATE_MIN_SPIKE_PAIRS || true)"
+fi
+if [[ -z "${RESERVE_SPIKE_SLOT}" ]]; then
+  RESERVE_SPIKE_SLOT="$(get_env_file_value LLM_ROTATE_RESERVE_SPIKE_SLOT || true)"
+fi
+if [[ -z "${RESERVE_SPIKE_MIN_CONFIDENCE}" ]]; then
+  RESERVE_SPIKE_MIN_CONFIDENCE="$(get_env_file_value LLM_ROTATE_RESERVE_SPIKE_MIN_CONFIDENCE || true)"
 fi
 if [[ -z "${USE_TOKEN_INFO_PREFILTER}" ]]; then
   USE_TOKEN_INFO_PREFILTER="$(get_env_file_value LLM_ROTATE_USE_TOKEN_INFO_PREFILTER || true)"
@@ -500,6 +513,8 @@ SOURCE_DIVERSITY_ENABLED="${SOURCE_DIVERSITY_ENABLED:-true}"
 MIN_BINANCE_SKILL_PAIRS="${MIN_BINANCE_SKILL_PAIRS:-2}"
 MIN_ALGO_PAIRS="${MIN_ALGO_PAIRS:-2}"
 MIN_SPIKE_PAIRS="${MIN_SPIKE_PAIRS:-1}"
+RESERVE_SPIKE_SLOT="${RESERVE_SPIKE_SLOT:-false}"
+RESERVE_SPIKE_MIN_CONFIDENCE="${RESERVE_SPIKE_MIN_CONFIDENCE:-0.80}"
 USE_TOKEN_INFO_PREFILTER="${USE_TOKEN_INFO_PREFILTER:-true}"
 TOKEN_INFO_MIN_LIQUIDITY_USD="${TOKEN_INFO_MIN_LIQUIDITY_USD:-1000000}"
 TOKEN_INFO_MIN_HOLDERS="${TOKEN_INFO_MIN_HOLDERS:-1000}"
@@ -546,6 +561,10 @@ if ! [[ "${MIN_ALGO_PAIRS}" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "${MIN_SPIKE_PAIRS}" =~ ^[0-9]+$ ]]; then
   echo "LLM_ROTATE_MIN_SPIKE_PAIRS must be an integer." >&2
+  exit 1
+fi
+if ! [[ "${RESERVE_SPIKE_MIN_CONFIDENCE}" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]; then
+  echo "LLM_ROTATE_RESERVE_SPIKE_MIN_CONFIDENCE must be a number." >&2
   exit 1
 fi
 if ! [[ "${TOKEN_INFO_MIN_LIQUIDITY_USD}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
@@ -804,6 +823,7 @@ selected_pairs="$(
     --min-binance-pairs "${MIN_BINANCE_SKILL_PAIRS}"
     --min-algo-pairs "${MIN_ALGO_PAIRS}"
     --min-spike-pairs "${MIN_SPIKE_PAIRS}"
+    --reserve-spike-min-confidence "${RESERVE_SPIKE_MIN_CONFIDENCE}"
   )
   if is_true "${USE_SMART_MONEY_BIAS}"; then
     diversity_cmd+=(--use-smart-money)
@@ -813,6 +833,9 @@ selected_pairs="$(
   fi
   if is_true "${SOURCE_DIVERSITY_ENABLED}"; then
     diversity_cmd+=(--diversity-enabled)
+  fi
+  if is_true "${RESERVE_SPIKE_SLOT}"; then
+    diversity_cmd+=(--reserve-spike-slot)
   fi
   "${diversity_cmd[@]}"
 )"
@@ -848,6 +871,11 @@ rotation_entry_json="$(
   fi
   "${entry_cmd[@]}"
 )"
+selected_spike_pairs="$(
+  python3 "${ROTATE_HELPER}" selected-source-pairs \
+    --rotation-entry-json "${rotation_entry_json}" \
+    --source spike
+)"
 printf '%s\n' "${rotation_entry_json}" >> "${LOG_PATH}"
 python3 "${ROOT_DIR}/scripts/rotation_outcomes.py" \
   record \
@@ -872,15 +900,24 @@ if [[ -z "${selected_pairs}" ]]; then
   else
     echo "RISK_PAIRS already empty."
   fi
+  spike_changed="$(
+    python3 "${ROTATE_HELPER}" risk-changed --current-risk-pairs "${current_spike_pairs}" --selected-pairs ""
+  )"
+  if [[ "${spike_changed}" == "true" ]]; then
+    python3 "${ROTATE_HELPER}" set-env-value --env-path "${ENV_FILE}" --key "SPIKE_PAIRS" --value ""
+    echo "Updated .env -> SPIKE_PAIRS="
+  else
+    echo "SPIKE_PAIRS already empty."
+  fi
   if is_true "${SYNC_WHITELIST}"; then
     python3 "${ROTATE_HELPER}" sync-whitelist --config-path "${CONFIG_FILE}" --core-pairs "${core_pairs}" --selected-pairs ""
   fi
   if [[ "${RESTART}" == "true" ]]; then
     echo "Restarting freqtrade with mode=${MODE}..."
-    if docker restart freqtrade >/dev/null 2>&1; then
-      echo "freqtrade container restarted."
+    if STRATEGY_MODE="${MODE}" docker compose up -d --force-recreate freqtrade >/dev/null 2>&1; then
+      echo "freqtrade container recreated."
     else
-      STRATEGY_MODE="${MODE}" docker compose up -d freqtrade
+      docker restart freqtrade >/dev/null 2>&1 || true
     fi
   else
     echo "Tip: restart freqtrade to apply the cleared risk-pair configuration."
@@ -893,6 +930,9 @@ echo "Selected risk pairs: ${selected_pairs}"
 
 risk_changed="$(
   python3 "${ROTATE_HELPER}" risk-changed --current-risk-pairs "${current_risk_pairs}" --selected-pairs "${selected_pairs}"
+)"
+spike_changed="$(
+  python3 "${ROTATE_HELPER}" risk-changed --current-risk-pairs "${current_spike_pairs}" --selected-pairs "${selected_spike_pairs}"
 )"
 
 if [[ "${APPLY}" != "true" ]]; then
@@ -907,17 +947,24 @@ else
   echo "RISK_PAIRS unchanged -> ${selected_pairs}"
 fi
 
+if [[ "${spike_changed}" == "true" ]]; then
+  python3 "${ROTATE_HELPER}" set-env-value --env-path "${ENV_FILE}" --key "SPIKE_PAIRS" --value "${selected_spike_pairs}"
+  echo "Updated .env -> SPIKE_PAIRS=${selected_spike_pairs}"
+else
+  echo "SPIKE_PAIRS unchanged -> ${selected_spike_pairs}"
+fi
+
 if is_true "${SYNC_WHITELIST}"; then
   python3 "${ROTATE_HELPER}" sync-whitelist --config-path "${CONFIG_FILE}" --core-pairs "${core_pairs}" --selected-pairs "${selected_pairs}"
 fi
 
 if [[ "${RESTART}" == "true" ]]; then
-  if [[ "${risk_changed}" == "true" ]]; then
+  if [[ "${risk_changed}" == "true" || "${spike_changed}" == "true" ]]; then
     echo "Restarting freqtrade with mode=${MODE}..."
-    if docker restart freqtrade >/dev/null 2>&1; then
-      echo "freqtrade container restarted."
+    if STRATEGY_MODE="${MODE}" docker compose up -d --force-recreate freqtrade >/dev/null 2>&1; then
+      echo "freqtrade container recreated."
     else
-      STRATEGY_MODE="${MODE}" docker compose up -d freqtrade
+      docker restart freqtrade >/dev/null 2>&1 || true
     fi
   else
     echo "Skipping freqtrade restart (selected pairs unchanged)."

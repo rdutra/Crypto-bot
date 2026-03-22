@@ -16,6 +16,7 @@ from .reporting import (
     print_metrics_summary,
     print_ranking_summary,
     selected_pairs,
+    selected_source_pairs,
 )
 from .state import risk_changed, set_env_value, sync_whitelist
 
@@ -114,6 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
     selected = subparsers.add_parser("selected-pairs")
     selected.add_argument("--rank-response", required=True)
 
+    selected_source = subparsers.add_parser("selected-source-pairs")
+    selected_source.add_argument("--rotation-entry-json", required=True)
+    selected_source.add_argument("--source", required=True)
+
     diversity = subparsers.add_parser("enforce-source-diversity")
     diversity.add_argument("--rank-response", required=True)
     diversity.add_argument("--metrics-json", required=True)
@@ -127,6 +132,8 @@ def build_parser() -> argparse.ArgumentParser:
     diversity.add_argument("--min-binance-pairs", type=int, required=True)
     diversity.add_argument("--min-algo-pairs", type=int, required=True)
     diversity.add_argument("--min-spike-pairs", type=int, required=True)
+    diversity.add_argument("--reserve-spike-slot", action="store_true")
+    diversity.add_argument("--reserve-spike-min-confidence", type=float, default=0.80)
 
     entry = subparsers.add_parser("build-rotation-entry")
     entry.add_argument("--metrics-json", required=True)
@@ -175,6 +182,7 @@ def main() -> int:
         "build-rank-request": build_rank_request,
         "print-ranking-summary": print_ranking_summary,
         "selected-pairs": selected_pairs,
+        "selected-source-pairs": selected_source_pairs,
         "enforce-source-diversity": enforce_source_diversity,
         "build-rotation-entry": build_rotation_entry,
         "risk-changed": risk_changed,

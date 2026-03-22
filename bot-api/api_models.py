@@ -45,6 +45,8 @@ class PairCandidate(BaseModel):
     trend_4h: str
     market_structure: str
     deterministic_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    data_source: str = ""
+    candidate_sources: List[str] = Field(default_factory=list)
 
 
 class RankPairsRequest(BaseModel):
