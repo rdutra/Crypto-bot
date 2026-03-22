@@ -86,11 +86,19 @@ Dry-run (aggressive):
 ./scripts/run-dry-watch.sh --mode aggressive
 ```
 
+Dry-run (aggressive, rotation-aligned strategy):
+
+```bash
+FREQTRADE_STRATEGY=LlmRotationAlignedStrategy ./scripts/run-dry-watch.sh --mode aggressive
+```
+
 Dry-run + LLM risk-pair rotation before startup:
 
 ```bash
 ./scripts/run-dry-watch.sh --mode aggressive --rotate-risk-pairs
 ```
+
+Current defaults already assume `LlmRotationAlignedStrategy`, `LLM_ROTATE_ALLOWED_RISK=low medium high`, and `LLM_ROTATE_ALLOWED_REGIMES=trend_pullback breakout mean_reversion`.
 
 Live trading (only when `dry_run=false`):
 
@@ -159,4 +167,12 @@ docker compose down
 - Freqtrade log: `freqtrade/user_data/logs/freqtrade.log`
 - Rotation log: `freqtrade/user_data/logs/llm-pair-rotation.log`
 - Runtime policy: `freqtrade/user_data/logs/llm-runtime-policy.json`
-- Scanner DB: `freqtrade/user_data/logs/spike-scanner.sqlite`
+- Scanner DB: `postgresql+psycopg2://stack:stack@stack-postgres:5432/spike_scanner` (`freqtrade/user_data/logs/spike-scanner.sqlite` remains the migration source/fallback)
+- Analytics DB: `postgresql+psycopg2://stack:stack@stack-postgres:5432/stack_analytics`
+
+Postgres admin:
+
+```bash
+./scripts/stack-postgres-admin.sh check
+./scripts/stack-postgres-admin.sh backup
+```

@@ -4,6 +4,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 LOGGER = logging.getLogger(__name__)
 
@@ -14,17 +15,83 @@ class PredictionStore:
         self.db_path = db_path
         self.horizons_minutes = horizons_minutes
         self.orphan_outcomes_pruned = 0
+        self.backend = self._detect_backend(db_path)
 
         os.makedirs(os.path.dirname(self.jsonl_path), exist_ok=True)
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        if self.backend == "sqlite":
+            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA foreign_keys = ON")
+        else:
+            import psycopg2
 
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        # Keep relational integrity active for every connection.
-        self.conn.execute("PRAGMA foreign_keys = ON")
+            self.conn = psycopg2.connect(self._normalize_postgres_target(self.db_path))
+
         self._init_db()
 
+    @staticmethod
+    def _detect_backend(target: str) -> str:
+        scheme = urlparse(str(target).strip()).scheme.lower()
+        return "postgres" if scheme.startswith("postgres") else "sqlite"
+
+    @staticmethod
+    def _normalize_postgres_target(target: str) -> str:
+        normalized = str(target).strip()
+        if normalized.startswith("postgresql+psycopg2://"):
+            return "postgresql://" + normalized[len("postgresql+psycopg2://") :]
+        if normalized.startswith("postgresql+psycopg://"):
+            return "postgresql://" + normalized[len("postgresql+psycopg://") :]
+        return normalized
+
+    def _sql(self, query: str) -> str:
+        if self.backend == "postgres":
+            return query.replace("?", "%s")
+        return query
+
+    def _cursor(self):
+        if self.backend == "postgres":
+            import psycopg2.extras
+
+            return self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        return self.conn.cursor()
+
+    @staticmethod
+    def _row_to_dict(row: Any) -> dict[str, Any]:
+        if isinstance(row, dict):
+            return dict(row)
+        return dict(row)
+
+    def _fetchall(self, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+        cur = self._cursor()
+        cur.execute(self._sql(query), params)
+        rows = cur.fetchall()
+        cur.close()
+        return [self._row_to_dict(row) for row in rows]
+
+    def _fetchone(self, query: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
+        cur = self._cursor()
+        cur.execute(self._sql(query), params)
+        row = cur.fetchone()
+        cur.close()
+        return None if row is None else self._row_to_dict(row)
+
+    def _execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
+        cur = self._cursor()
+        cur.execute(self._sql(query), params)
+        cur.close()
+
     def _init_db(self) -> None:
+        if self.backend == "sqlite":
+            self._init_sqlite()
+        else:
+            self._init_postgres()
+        self.orphan_outcomes_pruned = self._cleanup_orphan_outcomes()
+        if self.orphan_outcomes_pruned > 0:
+            LOGGER.warning("Pruned %s orphan outcomes rows from scanner DB.", self.orphan_outcomes_pruned)
+        self.conn.commit()
+
+    def _init_sqlite(self) -> None:
         cur = self.conn.cursor()
         cur.execute(
             """
@@ -86,13 +153,74 @@ class PredictionStore:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_alert_id ON outcomes(alert_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_llm_shadow_evals_ts ON llm_shadow_evals(ts)")
-        self._ensure_alert_columns()
-        self.orphan_outcomes_pruned = self._cleanup_orphan_outcomes()
-        if self.orphan_outcomes_pruned > 0:
-            LOGGER.warning("Pruned %s orphan outcomes rows from scanner DB.", self.orphan_outcomes_pruned)
-        self.conn.commit()
+        self._ensure_alert_columns_sqlite()
+        cur.close()
 
-    def _ensure_alert_columns(self) -> None:
+    def _init_postgres(self) -> None:
+        cur = self._cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS alerts (
+                id BIGSERIAL PRIMARY KEY,
+                ts TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                score DOUBLE PRECISION NOT NULL,
+                entry_price DOUBLE PRECISION,
+                meta_json TEXT NOT NULL,
+                llm_allowed INTEGER,
+                llm_regime TEXT,
+                llm_risk_level TEXT,
+                llm_confidence DOUBLE PRECISION,
+                llm_note TEXT,
+                llm_reason TEXT,
+                llm_latency_ms INTEGER
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS outcomes (
+                id BIGSERIAL PRIMARY KEY,
+                alert_id BIGINT NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
+                symbol TEXT NOT NULL,
+                horizon_minutes INTEGER NOT NULL,
+                due_ts TEXT NOT NULL,
+                resolved_ts TEXT,
+                observed_price DOUBLE PRECISION,
+                return_pct DOUBLE PRECISION,
+                status TEXT NOT NULL DEFAULT 'pending',
+                UNIQUE(alert_id, horizon_minutes)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS llm_shadow_evals (
+                id BIGSERIAL PRIMARY KEY,
+                ts TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                score DOUBLE PRECISION NOT NULL,
+                spread_pct DOUBLE PRECISION,
+                threshold_ok INTEGER,
+                cooldown_ok INTEGER,
+                eligible_alert INTEGER,
+                llm_allowed INTEGER,
+                llm_regime TEXT,
+                llm_risk_level TEXT,
+                llm_confidence DOUBLE PRECISION,
+                llm_reason TEXT,
+                llm_latency_ms INTEGER
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_status_due ON outcomes(status, due_ts)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_alert_id ON outcomes(alert_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_llm_shadow_evals_ts ON llm_shadow_evals(ts)")
+        self._ensure_alert_columns_postgres()
+        cur.close()
+
+    def _ensure_alert_columns_sqlite(self) -> None:
         cur = self.conn.cursor()
         existing = {str(row["name"]) for row in cur.execute("PRAGMA table_info(alerts)").fetchall()}
         wanted: dict[str, str] = {
@@ -108,9 +236,35 @@ class PredictionStore:
             if column in existing:
                 continue
             cur.execute(f"ALTER TABLE alerts ADD COLUMN {column} {col_type}")
+        cur.close()
+
+    def _ensure_alert_columns_postgres(self) -> None:
+        existing_rows = self._fetchall(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'alerts' AND table_schema = current_schema()
+            """
+        )
+        existing = {str(row["column_name"]) for row in existing_rows}
+        wanted: dict[str, str] = {
+            "llm_allowed": "INTEGER",
+            "llm_regime": "TEXT",
+            "llm_risk_level": "TEXT",
+            "llm_confidence": "DOUBLE PRECISION",
+            "llm_note": "TEXT",
+            "llm_reason": "TEXT",
+            "llm_latency_ms": "INTEGER",
+        }
+        cur = self._cursor()
+        for column, col_type in wanted.items():
+            if column in existing:
+                continue
+            cur.execute(f"ALTER TABLE alerts ADD COLUMN {column} {col_type}")
+        cur.close()
 
     def _cleanup_orphan_outcomes(self) -> int:
-        cur = self.conn.cursor()
+        cur = self._cursor()
         cur.execute(
             """
             DELETE FROM outcomes
@@ -118,6 +272,7 @@ class PredictionStore:
             """
         )
         deleted = int(cur.rowcount or 0)
+        cur.close()
         return max(0, deleted)
 
     @staticmethod
@@ -162,7 +317,7 @@ class PredictionStore:
         payload["ts"] = ts
 
         with open(self.jsonl_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, separators=(",", ":")) + "\\n")
+            f.write(json.dumps(payload, separators=(",", ":")) + "\n")
 
         symbol = str(payload.get("symbol", "")).upper()
         score = float(payload.get("score", 0.0))
@@ -188,49 +343,86 @@ class PredictionStore:
         except (TypeError, ValueError):
             llm_latency_ms = None
 
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO alerts(
-                ts, symbol, score, entry_price, meta_json,
-                llm_allowed, llm_regime, llm_risk_level, llm_confidence, llm_note, llm_reason, llm_latency_ms
+        if self.backend == "postgres":
+            row = self._fetchone(
+                """
+                INSERT INTO alerts(
+                    ts, symbol, score, entry_price, meta_json,
+                    llm_allowed, llm_regime, llm_risk_level, llm_confidence, llm_note, llm_reason, llm_latency_ms
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    ts,
+                    symbol,
+                    score,
+                    entry_price,
+                    meta_json,
+                    llm_allowed,
+                    llm_regime,
+                    llm_risk_level,
+                    llm_confidence,
+                    llm_note,
+                    llm_reason,
+                    llm_latency_ms,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                ts,
-                symbol,
-                score,
-                entry_price,
-                meta_json,
-                llm_allowed,
-                llm_regime,
-                llm_risk_level,
-                llm_confidence,
-                llm_note,
-                llm_reason,
-                llm_latency_ms,
-            ),
-        )
-        alert_id = int(cur.lastrowid)
+            alert_id = int(row["id"])
+        else:
+            cur = self.conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO alerts(
+                    ts, symbol, score, entry_price, meta_json,
+                    llm_allowed, llm_regime, llm_risk_level, llm_confidence, llm_note, llm_reason, llm_latency_ms
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ts,
+                    symbol,
+                    score,
+                    entry_price,
+                    meta_json,
+                    llm_allowed,
+                    llm_regime,
+                    llm_risk_level,
+                    llm_confidence,
+                    llm_note,
+                    llm_reason,
+                    llm_latency_ms,
+                ),
+            )
+            alert_id = int(cur.lastrowid)
+            cur.close()
 
         for horizon in self.horizons_minutes:
             due_ts = self._iso(now + timedelta(minutes=horizon))
-            cur.execute(
-                """
-                INSERT OR IGNORE INTO outcomes(alert_id, symbol, horizon_minutes, due_ts, status)
-                VALUES (?, ?, ?, ?, 'pending')
-                """,
-                (alert_id, symbol, int(horizon), due_ts),
-            )
+            if self.backend == "postgres":
+                self._execute(
+                    """
+                    INSERT INTO outcomes(alert_id, symbol, horizon_minutes, due_ts, status)
+                    VALUES (?, ?, ?, ?, 'pending')
+                    ON CONFLICT (alert_id, horizon_minutes) DO NOTHING
+                    """,
+                    (alert_id, symbol, int(horizon), due_ts),
+                )
+            else:
+                self._execute(
+                    """
+                    INSERT OR IGNORE INTO outcomes(alert_id, symbol, horizon_minutes, due_ts, status)
+                    VALUES (?, ?, ?, ?, 'pending')
+                    """,
+                    (alert_id, symbol, int(horizon), due_ts),
+                )
 
         self.conn.commit()
         return alert_id
 
     def resolve_due_outcomes(self, current_prices: dict[str, float], limit: int = 200) -> int:
         now = self._iso(self._utc_now())
-        cur = self.conn.cursor()
-        rows = cur.execute(
+        rows = self._fetchall(
             """
             SELECT o.id, o.symbol, o.horizon_minutes, a.entry_price
             FROM outcomes o
@@ -240,7 +432,7 @@ class PredictionStore:
             LIMIT ?
             """,
             (now, int(limit)),
-        ).fetchall()
+        )
 
         resolved = 0
         for row in rows:
@@ -252,7 +444,7 @@ class PredictionStore:
                 continue
 
             return_pct = ((observed_price / float(entry_price)) - 1.0) * 100.0
-            cur.execute(
+            self._execute(
                 """
                 UPDATE outcomes
                 SET resolved_ts = ?, observed_price = ?, return_pct = ?, status = 'resolved'
@@ -297,33 +489,63 @@ class PredictionStore:
         except (TypeError, ValueError):
             llm_latency_ms = None
 
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO llm_shadow_evals(
-                ts, symbol, score, spread_pct, threshold_ok, cooldown_ok, eligible_alert,
-                llm_allowed, llm_regime, llm_risk_level, llm_confidence, llm_reason, llm_latency_ms
+        if self.backend == "postgres":
+            row = self._fetchone(
+                """
+                INSERT INTO llm_shadow_evals(
+                    ts, symbol, score, spread_pct, threshold_ok, cooldown_ok, eligible_alert,
+                    llm_allowed, llm_regime, llm_risk_level, llm_confidence, llm_reason, llm_latency_ms
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    ts,
+                    symbol,
+                    score,
+                    spread_pct,
+                    threshold_ok,
+                    cooldown_ok,
+                    eligible_alert,
+                    llm_allowed,
+                    llm_regime,
+                    llm_risk_level,
+                    llm_confidence,
+                    llm_reason,
+                    llm_latency_ms,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                ts,
-                symbol,
-                score,
-                spread_pct,
-                threshold_ok,
-                cooldown_ok,
-                eligible_alert,
-                llm_allowed,
-                llm_regime,
-                llm_risk_level,
-                llm_confidence,
-                llm_reason,
-                llm_latency_ms,
-            ),
-        )
+            new_id = int(row["id"])
+        else:
+            cur = self.conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO llm_shadow_evals(
+                    ts, symbol, score, spread_pct, threshold_ok, cooldown_ok, eligible_alert,
+                    llm_allowed, llm_regime, llm_risk_level, llm_confidence, llm_reason, llm_latency_ms
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ts,
+                    symbol,
+                    score,
+                    spread_pct,
+                    threshold_ok,
+                    cooldown_ok,
+                    eligible_alert,
+                    llm_allowed,
+                    llm_regime,
+                    llm_risk_level,
+                    llm_confidence,
+                    llm_reason,
+                    llm_latency_ms,
+                ),
+            )
+            new_id = int(cur.lastrowid)
+            cur.close()
         self.conn.commit()
-        return int(cur.lastrowid)
+        return new_id
 
     def fetch_recent_alerts(
         self,
@@ -353,8 +575,7 @@ class PredictionStore:
             params.append(str(ts_to))
 
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-        cur = self.conn.cursor()
-        rows = cur.execute(
+        rows = self._fetchall(
             f"""
             SELECT id, ts, symbol, score, entry_price, meta_json,
                    llm_allowed, llm_regime, llm_risk_level, llm_confidence, llm_note, llm_reason, llm_latency_ms
@@ -365,11 +586,10 @@ class PredictionStore:
             OFFSET ?
             """,
             (*params, int(limit), int(offset)),
-        ).fetchall()
+        )
 
         data = []
-        for row in rows:
-            item = dict(row)
+        for item in rows:
             try:
                 item["meta"] = json.loads(item.pop("meta_json", "{}"))
             except Exception:
@@ -402,11 +622,7 @@ class PredictionStore:
             params.append(str(ts_to))
 
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-        cur = self.conn.cursor()
-        row = cur.execute(
-            f"SELECT COUNT(*) AS total FROM alerts {where_sql}",
-            tuple(params),
-        ).fetchone()
+        row = self._fetchone(f"SELECT COUNT(*) AS total FROM alerts {where_sql}", tuple(params))
         return int(row["total"]) if row and row["total"] is not None else 0
 
     def fetch_recent_outcomes(
@@ -440,8 +656,7 @@ class PredictionStore:
             params.append(str(ts_to))
 
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-        cur = self.conn.cursor()
-        rows = cur.execute(
+        return self._fetchall(
             f"""
             SELECT o.id, o.alert_id, a.ts AS alert_ts, o.symbol, o.horizon_minutes,
                    a.entry_price, o.due_ts, o.resolved_ts, o.observed_price, o.return_pct, o.status,
@@ -454,9 +669,7 @@ class PredictionStore:
             OFFSET ?
             """,
             (*params, int(limit), int(offset)),
-        ).fetchall()
-
-        return [dict(row) for row in rows]
+        )
 
     def count_outcomes(
         self,
@@ -487,8 +700,7 @@ class PredictionStore:
             params.append(str(ts_to))
 
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-        cur = self.conn.cursor()
-        row = cur.execute(
+        row = self._fetchone(
             f"""
             SELECT COUNT(*) AS total
             FROM outcomes o
@@ -496,7 +708,7 @@ class PredictionStore:
             {where_sql}
             """,
             tuple(params),
-        ).fetchone()
+        )
         return int(row["total"]) if row and row["total"] is not None else 0
 
     def fetch_recent_llm_shadow_evals(
@@ -526,8 +738,7 @@ class PredictionStore:
             params.append(str(ts_to))
 
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-        cur = self.conn.cursor()
-        rows = cur.execute(
+        return self._fetchall(
             f"""
             SELECT id, ts, symbol, score, spread_pct, threshold_ok, cooldown_ok, eligible_alert,
                    llm_allowed, llm_regime, llm_risk_level, llm_confidence, llm_reason, llm_latency_ms
@@ -538,8 +749,7 @@ class PredictionStore:
             OFFSET ?
             """,
             (*params, int(limit), int(offset)),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        )
 
     def count_llm_shadow_evals(
         self,
@@ -566,16 +776,11 @@ class PredictionStore:
             params.append(str(ts_to))
 
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-        cur = self.conn.cursor()
-        row = cur.execute(
-            f"SELECT COUNT(*) AS total FROM llm_shadow_evals {where_sql}",
-            tuple(params),
-        ).fetchone()
+        row = self._fetchone(f"SELECT COUNT(*) AS total FROM llm_shadow_evals {where_sql}", tuple(params))
         return int(row["total"]) if row and row["total"] is not None else 0
 
     def fetch_horizon_summary(self) -> list[dict[str, Any]]:
-        cur = self.conn.cursor()
-        rows = cur.execute(
+        rows = self._fetchall(
             """
             SELECT
               o.horizon_minutes,
@@ -592,11 +797,10 @@ class PredictionStore:
             GROUP BY o.horizon_minutes
             ORDER BY o.horizon_minutes ASC
             """
-        ).fetchall()
+        )
 
         summary = []
-        for row in rows:
-            item = dict(row)
+        for item in rows:
             if item.get("avg_return_pct") is not None:
                 item["avg_return_pct"] = float(item["avg_return_pct"])
             if item.get("win_rate") is not None:
@@ -605,8 +809,7 @@ class PredictionStore:
         return summary
 
     def fetch_llm_outcome_summary(self) -> list[dict[str, Any]]:
-        cur = self.conn.cursor()
-        rows = cur.execute(
+        rows = self._fetchall(
             """
             SELECT
               COALESCE(a.llm_allowed, -1) AS llm_allowed,
@@ -620,11 +823,10 @@ class PredictionStore:
             GROUP BY COALESCE(a.llm_allowed, -1), o.horizon_minutes
             ORDER BY o.horizon_minutes ASC, llm_allowed DESC
             """
-        ).fetchall()
+        )
 
         summary = []
-        for row in rows:
-            item = dict(row)
+        for item in rows:
             if item.get("avg_return_pct") is not None:
                 item["avg_return_pct"] = float(item["avg_return_pct"])
             if item.get("win_rate") is not None:

@@ -43,10 +43,9 @@ def sync_whitelist(args: argparse.Namespace) -> int:
         return 1
     cfg = json.loads(args.config_path.read_text())
     exchange = cfg.setdefault("exchange", {})
-    whitelist = exchange.get("pair_whitelist") or []
     ordered = []
     seen = set()
-    for pair in whitelist + parse_pairs(args.core_pairs) + parse_pairs(args.selected_pairs):
+    for pair in parse_pairs(args.core_pairs) + parse_pairs(args.selected_pairs):
         if pair in seen:
             continue
         seen.add(pair)

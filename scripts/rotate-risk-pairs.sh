@@ -13,7 +13,7 @@ TIMEFRAME="${LLM_ROTATE_TIMEFRAME:-1h}"
 LOOKBACK_CANDLES="${LLM_ROTATE_LOOKBACK_CANDLES:-240}"
 TOP_N="${LLM_ROTATE_TOP_N:-3}"
 MIN_CONFIDENCE="${LLM_ROTATE_MIN_CONFIDENCE:-0.60}"
-ALLOWED_RISK="${LLM_ROTATE_ALLOWED_RISK:-low medium}"
+ALLOWED_RISK="${LLM_ROTATE_ALLOWED_RISK:-}"
 ALLOWED_REGIMES="${LLM_ROTATE_ALLOWED_REGIMES:-}"
 CANDIDATES="${LLM_ROTATE_CANDIDATES:-}"
 AUTO_DISCOVER="${LLM_ROTATE_AUTO_DISCOVER:-true}"
@@ -27,7 +27,7 @@ WHITELIST_ONLY="${LLM_ROTATE_WHITELIST_ONLY:-false}"
 SYNC_WHITELIST="${LLM_ROTATE_SYNC_WHITELIST:-true}"
 LOG_PATH="${LLM_ROTATE_LOG_PATH:-${ROOT_DIR}/freqtrade/user_data/logs/llm-pair-rotation.log}"
 USE_SPIKE_BIAS="${LLM_ROTATE_USE_SPIKE_BIAS:-}"
-SPIKE_DB_PATH="${LLM_ROTATE_SPIKE_DB_PATH:-}"
+SPIKE_DB_TARGET="${LLM_ROTATE_SPIKE_DB_URL:-${LLM_ROTATE_SPIKE_DB_PATH:-}}"
 SPIKE_LOOKBACK_HOURS="${LLM_ROTATE_SPIKE_LOOKBACK_HOURS:-}"
 SPIKE_TOP_N="${LLM_ROTATE_SPIKE_TOP_N:-}"
 SPIKE_MIN_SCORE="${LLM_ROTATE_SPIKE_MIN_SCORE:-}"
@@ -56,7 +56,7 @@ EXCLUDED_PAIRS="${LLM_ROTATE_EXCLUDED_PAIRS:-}"
 MIN_ATR_PCT="${LLM_ROTATE_MIN_ATR_PCT:-}"
 MIN_ATR_PCT_AGGRESSIVE="${LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE:-}"
 ACTIVE_MIN_ATR_PCT=""
-ROTATION_OUTCOME_DB_PATH="${LLM_ROTATE_OUTCOME_DB_PATH:-}"
+ROTATION_OUTCOME_DB_PATH="${LLM_ROTATE_OUTCOME_DB_URL:-${LLM_ROTATE_OUTCOME_DB_PATH:-}}"
 ROTATION_OUTCOME_HORIZON_MINUTES="${LLM_ROTATE_OUTCOME_HORIZON_MINUTES:-}"
 ROTATION_OUTCOME_SUCCESS_PCT="${LLM_ROTATE_OUTCOME_SUCCESS_PCT:-}"
 MODE="${STRATEGY_MODE:-conservative}"
@@ -124,7 +124,7 @@ is_true() {
 }
 
 spike_bias_candidates() {
-  local db_path="$1"
+  local db_target="$1"
   local quote_asset="$2"
   local lookback_hours="$3"
   local top_n="$4"
@@ -132,7 +132,7 @@ spike_bias_candidates() {
   local require_llm_allowed="$6"
   local args=(
     "${ROTATE_HELPER}" spike-bias-candidates
-    --db-path "${db_path}"
+    --db-target "${db_target}"
     --quote-asset "${quote_asset}"
     --lookback-hours "${lookback_hours}"
     --top-n "${top_n}"
@@ -339,11 +339,31 @@ if [[ "${MODE}" != "conservative" && "${MODE}" != "aggressive" ]]; then
   exit 1
 fi
 
+core_pairs="${CORE_PAIRS:-}"
+if [[ -z "${core_pairs}" ]]; then
+  core_pairs="$(get_env_file_value CORE_PAIRS || true)"
+fi
+core_pairs="${core_pairs:-BTC/USDT ETH/USDT BNB/USDT}"
+
+freqtrade_strategy="${FREQTRADE_STRATEGY:-}"
+if [[ -z "${freqtrade_strategy}" ]]; then
+  freqtrade_strategy="$(get_env_file_value FREQTRADE_STRATEGY || true)"
+fi
+freqtrade_strategy="${freqtrade_strategy:-LlmTrendPullbackStrategy}"
+
 if [[ -z "${ALLOWED_REGIMES}" ]]; then
-  if [[ "${MODE}" == "aggressive" ]]; then
+  if [[ "${freqtrade_strategy}" == "LlmRotationAlignedStrategy" || "${MODE}" == "aggressive" ]]; then
     ALLOWED_REGIMES="trend_pullback breakout mean_reversion"
   else
     ALLOWED_REGIMES="trend_pullback"
+  fi
+fi
+
+if [[ -z "${ALLOWED_RISK}" ]]; then
+  if [[ "${freqtrade_strategy}" == "LlmRotationAlignedStrategy" && "${MODE}" == "aggressive" ]]; then
+    ALLOWED_RISK="low medium high"
+  else
+    ALLOWED_RISK="low medium"
   fi
 fi
 
@@ -352,12 +372,6 @@ if [[ "${DATA_SOURCE}" != "local" && "${DATA_SOURCE}" != "exchange" && "${DATA_S
   echo "--data-source must be one of: local, exchange, auto." >&2
   exit 1
 fi
-
-core_pairs="${CORE_PAIRS:-}"
-if [[ -z "${core_pairs}" ]]; then
-  core_pairs="$(get_env_file_value CORE_PAIRS || true)"
-fi
-core_pairs="${core_pairs:-BTC/USDT ETH/USDT BNB/USDT}"
 
 current_risk_pairs="${RISK_PAIRS:-}"
 if [[ -z "${current_risk_pairs}" ]]; then
@@ -374,8 +388,11 @@ fi
 if [[ -z "${USE_SPIKE_BIAS}" ]]; then
   USE_SPIKE_BIAS="$(get_env_file_value LLM_ROTATE_USE_SPIKE_BIAS || true)"
 fi
-if [[ -z "${SPIKE_DB_PATH}" ]]; then
-  SPIKE_DB_PATH="$(get_env_file_value LLM_ROTATE_SPIKE_DB_PATH || true)"
+if [[ -z "${SPIKE_DB_TARGET}" ]]; then
+  SPIKE_DB_TARGET="$(get_env_file_value LLM_ROTATE_SPIKE_DB_URL || true)"
+fi
+if [[ -z "${SPIKE_DB_TARGET}" ]]; then
+  SPIKE_DB_TARGET="$(get_env_file_value LLM_ROTATE_SPIKE_DB_PATH || true)"
 fi
 if [[ -z "${SPIKE_LOOKBACK_HOURS}" ]]; then
   SPIKE_LOOKBACK_HOURS="$(get_env_file_value LLM_ROTATE_SPIKE_LOOKBACK_HOURS || true)"
@@ -456,6 +473,9 @@ if [[ -z "${MIN_ATR_PCT_AGGRESSIVE}" ]]; then
   MIN_ATR_PCT_AGGRESSIVE="$(get_env_file_value LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE || true)"
 fi
 if [[ -z "${ROTATION_OUTCOME_DB_PATH}" ]]; then
+  ROTATION_OUTCOME_DB_PATH="$(get_env_file_value LLM_ROTATE_OUTCOME_DB_URL || true)"
+fi
+if [[ -z "${ROTATION_OUTCOME_DB_PATH}" ]]; then
   ROTATION_OUTCOME_DB_PATH="$(get_env_file_value LLM_ROTATE_OUTCOME_DB_PATH || true)"
 fi
 if [[ -z "${ROTATION_OUTCOME_HORIZON_MINUTES}" ]]; then
@@ -465,7 +485,7 @@ if [[ -z "${ROTATION_OUTCOME_SUCCESS_PCT}" ]]; then
   ROTATION_OUTCOME_SUCCESS_PCT="$(get_env_file_value LLM_ROTATE_OUTCOME_SUCCESS_PCT || true)"
 fi
 USE_SPIKE_BIAS="${USE_SPIKE_BIAS:-false}"
-SPIKE_DB_PATH="${SPIKE_DB_PATH:-${ROOT_DIR}/freqtrade/user_data/logs/spike-scanner.sqlite}"
+SPIKE_DB_TARGET="${SPIKE_DB_TARGET:-${ROOT_DIR}/freqtrade/user_data/logs/spike-scanner.sqlite}"
 SPIKE_LOOKBACK_HOURS="${SPIKE_LOOKBACK_HOURS:-48}"
 SPIKE_TOP_N="${SPIKE_TOP_N:-4}"
 SPIKE_MIN_SCORE="${SPIKE_MIN_SCORE:-0.80}"
@@ -579,10 +599,10 @@ fi
 if [[ "${LOG_PATH}" != /* ]]; then
   LOG_PATH="${ROOT_DIR}/${LOG_PATH#./}"
 fi
-if [[ "${SPIKE_DB_PATH}" != /* ]]; then
-  SPIKE_DB_PATH="${ROOT_DIR}/${SPIKE_DB_PATH#./}"
+if [[ "${SPIKE_DB_TARGET}" != *"://"* && "${SPIKE_DB_TARGET}" != /* ]]; then
+  SPIKE_DB_TARGET="${ROOT_DIR}/${SPIKE_DB_TARGET#./}"
 fi
-if [[ "${ROTATION_OUTCOME_DB_PATH}" != /* ]]; then
+if [[ "${ROTATION_OUTCOME_DB_PATH}" != *"://"* && "${ROTATION_OUTCOME_DB_PATH}" != /* ]]; then
   ROTATION_OUTCOME_DB_PATH="${ROOT_DIR}/${ROTATION_OUTCOME_DB_PATH#./}"
 fi
 
@@ -592,7 +612,7 @@ SPIKE_BIAS_CANDIDATES=""
 if is_true "${USE_SPIKE_BIAS}"; then
   SPIKE_BIAS_CANDIDATES="$(
     spike_bias_candidates \
-      "${SPIKE_DB_PATH}" \
+      "${SPIKE_DB_TARGET}" \
       "${QUOTE_ASSET}" \
       "${SPIKE_LOOKBACK_HOURS}" \
       "${SPIKE_TOP_N}" \
@@ -838,7 +858,33 @@ echo "Rotation log appended: ${LOG_PATH}"
 
 if [[ -z "${selected_pairs}" ]]; then
   echo ""
-  echo "No pair passed your filters. Keeping current RISK_PAIRS unchanged."
+  echo "No pair passed your filters."
+  risk_changed="$(
+    python3 "${ROTATE_HELPER}" risk-changed --current-risk-pairs "${current_risk_pairs}" --selected-pairs ""
+  )"
+  if [[ "${APPLY}" != "true" ]]; then
+    echo "Preview only. Re-run with --apply to clear RISK_PAIRS and reduce the whitelist to core pairs."
+    exit 0
+  fi
+  if [[ "${risk_changed}" == "true" ]]; then
+    python3 "${ROTATE_HELPER}" set-env-value --env-path "${ENV_FILE}" --key "RISK_PAIRS" --value ""
+    echo "Updated .env -> RISK_PAIRS="
+  else
+    echo "RISK_PAIRS already empty."
+  fi
+  if is_true "${SYNC_WHITELIST}"; then
+    python3 "${ROTATE_HELPER}" sync-whitelist --config-path "${CONFIG_FILE}" --core-pairs "${core_pairs}" --selected-pairs ""
+  fi
+  if [[ "${RESTART}" == "true" ]]; then
+    echo "Restarting freqtrade with mode=${MODE}..."
+    if docker restart freqtrade >/dev/null 2>&1; then
+      echo "freqtrade container restarted."
+    else
+      STRATEGY_MODE="${MODE}" docker compose up -d freqtrade
+    fi
+  else
+    echo "Tip: restart freqtrade to apply the cleared risk-pair configuration."
+  fi
   exit 0
 fi
 

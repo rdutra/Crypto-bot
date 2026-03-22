@@ -35,6 +35,14 @@ def _env_float(key: str, default: float, min_value: float, max_value: float) -> 
     return max(min_value, min(max_value, parsed))
 
 
+def _env_int_raw(key: str, default: int, min_value: int, max_value: int) -> int:
+    try:
+        parsed = int(os.getenv(key, str(default)))
+    except ValueError:
+        parsed = default
+    return max(min_value, min(max_value, parsed))
+
+
 def _env_roi_table(default: Dict[str, float]) -> Dict[str, float]:
     raw = os.getenv("STRATEGY_MINIMAL_ROI_JSON", "").strip()
     if not raw:
@@ -81,6 +89,12 @@ class LlmTrendPullbackStrategy(IStrategy):
     trailing_stop_positive_offset = _env_float("STRATEGY_TRAILING_OFFSET", DEFAULT_TRAILING_OFFSET, 0.002, 0.2)
     trailing_only_offset_is_reached = True
     use_custom_stoploss = True
+    ignore_buying_expired_candle_after = _env_int_raw(
+        "IGNORE_BUYING_EXPIRED_CANDLE_AFTER",
+        1200 if STRATEGY_MODE == "aggressive" else 4500,
+        0,
+        3600,
+    )
 
     startup_candle_count = 250
     process_only_new_candles = True
@@ -94,6 +108,7 @@ class LlmTrendPullbackStrategy(IStrategy):
     _runtime_policy_log_key: Optional[str] = None
     _daily_guard_cache: Dict[str, Any] = {}
     _daily_guard_log_key: Optional[str] = None
+    _confirm_entry_log_keys: Dict[str, str] = {}
 
     def _is_aggressive(self) -> bool:
         return STRATEGY_MODE == "aggressive"
@@ -313,7 +328,7 @@ class LlmTrendPullbackStrategy(IStrategy):
         )
         if log_key and log_key != self._runtime_policy_log_key:
             self._runtime_policy_log_key = log_key
-            LOGGER.info(
+            self._logger().info(
                 "Runtime policy active profile=%s strictness=%s risk_stake=%.2f risk_max_open=%s source=%s reason=%s note=%s",
                 normalized.get("profile", "n/a"),
                 normalized.get("aggr_entry_strictness", "n/a"),
@@ -461,7 +476,7 @@ class LlmTrendPullbackStrategy(IStrategy):
         log_key = f"{day_key}:{int(allow_entries)}:{reason}"
         if log_key != self._daily_guard_log_key:
             self._daily_guard_log_key = log_key
-            LOGGER.info(
+            self._logger().info(
                 "Daily guard date=%s realized=%.2f%% target=%.2f%% max_loss=%.2f%% allow_entries=%s reason=%s",
                 day_key,
                 realized_pct,
@@ -550,6 +565,25 @@ class LlmTrendPullbackStrategy(IStrategy):
     def _entry_debug_log_enabled(self) -> bool:
         return _env_bool("ENTRY_DEBUG_LOG", self._is_live_like())
 
+    def _logger(self) -> logging.Logger:
+        return logging.getLogger(self.__class__.__name__)
+
+    def _log_confirm_entry(self, pair: str, current_time: datetime, allowed: bool, reason: str) -> None:
+        if not self._is_live_like():
+            return
+        candle_key = current_time.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+        log_key = f"{candle_key}:{int(allowed)}:{reason}"
+        if self._confirm_entry_log_keys.get(pair) == log_key:
+            return
+        self._confirm_entry_log_keys[pair] = log_key
+        self._logger().info(
+            "Confirm entry pair=%s candle=%s allowed=%s reason=%s",
+            pair,
+            candle_key,
+            int(allowed),
+            reason,
+        )
+
     def _log_entry_diagnostics(
         self,
         dataframe: DataFrame,
@@ -582,7 +616,7 @@ class LlmTrendPullbackStrategy(IStrategy):
             return
         self._entry_diag_log_keys[pair] = log_key
 
-        LOGGER.info(
+        self._logger().info(
             (
                 "Entry diag pair=%s candle=%s base_ok=%s final_ok=%s tag=%s failed=%s "
                 "rsi=%.2f adx=%.2f atr_pct=%.2f spread=%.3f vol_z=%.2f bench_risk_ok=%s "
@@ -711,7 +745,7 @@ class LlmTrendPullbackStrategy(IStrategy):
             self._entry_rank_log_key = rank_key
             preview = ", ".join([f"{p}:{s:.2f}" for p, s in candidates[:5]])
             if self._entry_ranking_log_enabled():
-                LOGGER.info(
+                self._logger().info(
                     "Entry ranking at %s -> selected=%s top_n=%s min_score=%.2f candidates=%s",
                     candle_label or current_time.isoformat(),
                     " ".join(sorted(selected_pairs)) or "none",
@@ -893,7 +927,7 @@ class LlmTrendPullbackStrategy(IStrategy):
         except requests.Timeout:
             allowed = fail_open
             reason = "llm_timeout_allow" if fail_open else "llm_timeout"
-            LOGGER.warning(
+            self._logger().warning(
                 "LLM classify timeout for %s (connect=%.1fs read=%.1fs). fail_open=%s",
                 pair,
                 connect_timeout,
@@ -903,11 +937,11 @@ class LlmTrendPullbackStrategy(IStrategy):
         except requests.RequestException as exc:
             allowed = fail_open
             reason = "llm_http_error_allow" if fail_open else "llm_http_error"
-            LOGGER.warning("LLM classify request error for %s: %s fail_open=%s", pair, exc, fail_open)
+            self._logger().warning("LLM classify request error for %s: %s fail_open=%s", pair, exc, fail_open)
         except Exception as exc:
             allowed = fail_open
             reason = "llm_error_allow" if fail_open else "llm_error"
-            LOGGER.warning("LLM classify unexpected error for %s: %s fail_open=%s", pair, exc, fail_open)
+            self._logger().warning("LLM classify unexpected error for %s: %s fail_open=%s", pair, exc, fail_open)
 
         self._llm_cache[cache_key] = (allowed, reason)
         return allowed, reason
@@ -1391,15 +1425,18 @@ class LlmTrendPullbackStrategy(IStrategy):
     ) -> bool:
         _ = (order_type, amount, rate, time_in_force, entry_tag, kwargs)
         if side == "long":
-            daily_allow, _, _ = self._daily_guard_status(current_time)
+            daily_allow, daily_reason, _ = self._daily_guard_status(current_time)
             if not daily_allow:
+                self._log_confirm_entry(pair, current_time, False, f"daily_guard:{daily_reason}")
                 return False
 
         if self._entry_ranking_enabled() and side == "long":
             if not self._ranked_entry_allowed(pair, current_time):
+                self._log_confirm_entry(pair, current_time, False, "entry_ranking")
                 return False
 
         if not self._is_risk_pair(pair):
+            self._log_confirm_entry(pair, current_time, True, "core_pair")
             return True
 
         max_risk_open = self._risk_max_open_trades()
@@ -1410,11 +1447,14 @@ class LlmTrendPullbackStrategy(IStrategy):
                 open_trades = Trade.get_open_trades()
             elif hasattr(Trade, "get_trades_proxy"):
                 open_trades = Trade.get_trades_proxy(is_open=True)
-        except Exception:
+        except Exception as exc:
+            self._log_confirm_entry(pair, current_time, True, f"open_trade_probe_error:{type(exc).__name__}")
             return True
 
         risk_open_count = sum(1 for trade in open_trades if self._is_risk_pair(getattr(trade, "pair", "")))
         if risk_open_count >= max_risk_open:
+            self._log_confirm_entry(pair, current_time, False, f"risk_open_limit:{risk_open_count}/{max_risk_open}")
             return False
 
+        self._log_confirm_entry(pair, current_time, True, f"ok:risk_open={risk_open_count}/{max_risk_open}")
         return True

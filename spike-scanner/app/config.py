@@ -69,7 +69,7 @@ class Settings(BaseModel):
     cooldown_minutes: int = _env_int("SPIKE_ALERT_COOLDOWN_MINUTES", 30)
     loop_seconds: int = _env_int("SPIKE_LOOP_SECONDS", 5)
     alert_log_path: str = _env_str("SPIKE_LOG_PATH", "/data/spike-alerts.jsonl")
-    db_path: str = _env_str("SPIKE_DB_PATH", "/data/spike-scanner.sqlite")
+    db_path: str = _env_str("SPIKE_DB_URL", _env_str("SPIKE_DB_PATH", "/data/spike-scanner.sqlite"))
     outcome_horizons_minutes: str = _env_str("SPIKE_OUTCOME_HORIZONS_MINUTES", "60,240,1440,2880")
     outcome_loop_seconds: int = _env_int("SPIKE_OUTCOME_LOOP_SECONDS", 30)
     outcome_batch_size: int = _env_int("SPIKE_OUTCOME_BATCH_SIZE", 200)

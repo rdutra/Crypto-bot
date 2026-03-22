@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     spike = subparsers.add_parser("spike-bias-candidates")
-    spike.add_argument("--db-path", type=Path, required=True)
+    spike.add_argument("--db-target", required=True)
     spike.add_argument("--quote-asset", required=True)
     spike.add_argument("--lookback-hours", type=float, required=True)
     spike.add_argument("--top-n", type=int, required=True)

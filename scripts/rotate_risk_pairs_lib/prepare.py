@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,14 @@ def _load_prepare_dependencies():
 
 def prepare_candidates(args: argparse.Namespace) -> int:
     pd, ta, ccxt = _load_prepare_dependencies()
+    exchange_timeout_ms = max(
+        1000,
+        int(float(os.getenv("ROTATE_EXCHANGE_TIMEOUT_MS", os.getenv("LLM_ROTATE_EXCHANGE_TIMEOUT_MS", "8000")))),
+    )
+    max_exchange_fallbacks = max(
+        0,
+        int(float(os.getenv("ROTATE_MAX_EXCHANGE_FALLBACKS", os.getenv("LLM_ROTATE_MAX_EXCHANGE_FALLBACKS", "6")))),
+    )
 
     def pair_to_filename(pair: str, timeframe: str) -> str:
         return f"{pair.replace('/', '_')}-{timeframe}.feather"
@@ -105,7 +114,13 @@ def prepare_candidates(args: argparse.Namespace) -> int:
         exchange_class = getattr(ccxt, exchange_id, None)
         if exchange_class is None:
             return None
-        return exchange_class({"enableRateLimit": True, "options": {"defaultType": "spot"}})
+        return exchange_class(
+            {
+                "enableRateLimit": True,
+                "timeout": exchange_timeout_ms,
+                "options": {"defaultType": "spot"},
+            }
+        )
 
     def load_exchange_ohlcv(exchange, pair: str, timeframe: str, lookback: int):
         if exchange is None:
@@ -185,6 +200,7 @@ def prepare_candidates(args: argparse.Namespace) -> int:
     candidates: list[str] = []
     candidate_sources: dict[str, set[str]] = {}
     discovery_notes: list[str] = []
+    exchange_fallback_state = {"used": 0, "skipped_budget": 0}
 
     def add_candidates(items: list[str], source_label: str) -> None:
         for pair in items:
@@ -260,6 +276,11 @@ def prepare_candidates(args: argparse.Namespace) -> int:
         if local_df is not None:
             df_cache[key] = (local_df, "local")
             return df_cache[key]
+        if exchange_fallback_state["used"] >= max_exchange_fallbacks:
+            exchange_fallback_state["skipped_budget"] += 1
+            df_cache[key] = (None, "exchange_budget_exhausted")
+            return df_cache[key]
+        exchange_fallback_state["used"] += 1
         ex_df = load_exchange_ohlcv(exchange, pair, tf, lb)
         df_cache[key] = (ex_df, "exchange")
         return df_cache[key]
@@ -277,6 +298,9 @@ def prepare_candidates(args: argparse.Namespace) -> int:
         raw_df, source_used = get_df(pair, args.rotate_timeframe, args.rotate_lookback_candles)
         df = add_indicators(raw_df)
         if df is None or len(df) < 220:
+            if source_used == "exchange_budget_exhausted":
+                result["skipped"].append({"pair": pair, "reason": "exchange_budget_exhausted"})
+                continue
             result["skipped"].append({"pair": pair, "reason": f"missing_or_short_{args.rotate_timeframe}_data"})
             continue
         row = df.iloc[-1]
@@ -354,5 +378,11 @@ def prepare_candidates(args: argparse.Namespace) -> int:
                 "candidate_sources": sorted(candidate_sources.get(pair, set())),
             }
         )
+    if exchange_fallback_state["used"] > 0:
+        result["discovery_notes"].append(
+            f"exchange_fallback_used={exchange_fallback_state['used']}/{max_exchange_fallbacks} timeout_ms={exchange_timeout_ms}"
+        )
+    if exchange_fallback_state["skipped_budget"] > 0:
+        result["discovery_notes"].append(f"exchange_budget_exhausted_count={exchange_fallback_state['skipped_budget']}")
     print(json.dumps(result, separators=(",", ":")))
     return 0

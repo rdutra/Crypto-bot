@@ -2,40 +2,28 @@ from __future__ import annotations
 
 import argparse
 import re
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 from .common import fetch_json, finite
+from spike_db import fetch_spike_bias_rows
 
 
 def spike_bias_candidates(args: argparse.Namespace) -> int:
-    db_path = args.db_path
+    db_target = str(args.db_target).strip()
     quote = str(args.quote_asset or "USDT").strip().upper()
     top_n = int(float(args.top_n))
-    if not db_path.exists() or top_n <= 0:
+    if not db_target or top_n <= 0:
         print("")
         return 0
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, int(float(args.lookback_hours))))
     best_by_pair: dict[str, tuple[int, int, float]] = {}
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT ts, symbol, score, llm_allowed, 1 AS source_rank, 1 AS eligible_rank FROM alerts ORDER BY id DESC LIMIT 2000"
-    ).fetchall()
-    if not rows:
-        rows = conn.execute(
-            """
-            SELECT ts, symbol, score, llm_allowed,
-                   0 AS source_rank,
-                   CASE WHEN eligible_alert = 1 THEN 1 ELSE 0 END AS eligible_rank
-            FROM llm_shadow_evals
-            ORDER BY id DESC
-            LIMIT 4000
-            """
-        ).fetchall()
-    conn.close()
+    try:
+        rows = fetch_spike_bias_rows(db_target)
+    except Exception:
+        print("")
+        return 0
 
     for row in rows:
         symbol = str(row["symbol"] or "").strip().upper()

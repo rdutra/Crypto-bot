@@ -55,6 +55,7 @@ services:
       LLM_DEBUG_MAX_ENTRIES: ${LLM_DEBUG_MAX_ENTRIES:-250}
       LLM_DEBUG_PROMPT_MAX_CHARS: ${LLM_DEBUG_PROMPT_MAX_CHARS:-8000}
       LLM_DEBUG_RESPONSE_MAX_CHARS: ${LLM_DEBUG_RESPONSE_MAX_CHARS:-8000}
+      LLM_DEBUG_DB_URL: ${LLM_DEBUG_DB_URL:-}
       LLM_DEBUG_DB_PATH: ${LLM_DEBUG_DB_PATH:-/app/data/llm-debug.sqlite}
       LLM_DEBUG_DB_MAX_ROWS: ${LLM_DEBUG_DB_MAX_ROWS:-50000}
       LLM_MARKET_RANK_SKILL_ENABLED: ${LLM_MARKET_RANK_SKILL_ENABLED:-false}
@@ -102,15 +103,36 @@ services:
       timeout: 5s
       retries: 10
 
+  stack-postgres:
+    image: postgres:16-alpine
+    container_name: stack-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${STACK_POSTGRES_USER:-stack}
+      POSTGRES_PASSWORD: ${STACK_POSTGRES_PASSWORD:-stack}
+      POSTGRES_DB: ${FREQTRADE_POSTGRES_DB:-freqtrade}
+      TZ: ${TZ:-UTC}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${STACK_POSTGRES_USER:-stack} -d ${FREQTRADE_POSTGRES_DB:-freqtrade}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - stack_postgres_data:/var/lib/postgresql/data
+
   freqtrade:
-    image: freqtradeorg/freqtrade:stable
+    build: ./freqtrade/docker
+    image: crypto-bot-freqtrade:latest
     container_name: freqtrade
     restart: unless-stopped
     depends_on:
       bot-api:
         condition: service_healthy
+      stack-postgres:
+        condition: service_healthy
     environment:
       BOT_API_URL: http://bot-api:8000
+      FREQTRADE_DB_URL: ${FREQTRADE_DB_URL:-sqlite:////freqtrade/user_data/tradesv3.sqlite}
       ENABLE_LLM_FILTER: ${ENABLE_LLM_FILTER:-false}
       LLM_MIN_CONFIDENCE: ${LLM_MIN_CONFIDENCE:-0.65}
       LLM_CONNECT_TIMEOUT_SECONDS: ${LLM_CONNECT_TIMEOUT_SECONDS:-2}
@@ -121,6 +143,7 @@ services:
       RUNTIME_POLICY_PATH: ${RUNTIME_POLICY_PATH:-/freqtrade/user_data/logs/llm-runtime-policy.json}
       RUNTIME_POLICY_REFRESH_SECONDS: ${RUNTIME_POLICY_REFRESH_SECONDS:-30}
       STRATEGY_MODE: ${STRATEGY_MODE:-conservative}
+      FREQTRADE_STRATEGY: ${FREQTRADE_STRATEGY:-LlmRotationAlignedStrategy}
       STRATEGY_MINIMAL_ROI_JSON: ${STRATEGY_MINIMAL_ROI_JSON:-}
       STRATEGY_STOPLOSS: ${STRATEGY_STOPLOSS:-}
       STRATEGY_TRAILING_STOP: ${STRATEGY_TRAILING_STOP:-}
@@ -168,10 +191,10 @@ services:
     command: >
       trade
       --logfile /freqtrade/user_data/logs/freqtrade.log
-      --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
+      --db-url ${FREQTRADE_DB_URL:-sqlite:////freqtrade/user_data/tradesv3.sqlite}
       --config /freqtrade/user_data/config.json
       --strategy-path /freqtrade/user_data/strategies
-      --strategy LlmTrendPullbackStrategy
+      --strategy ${FREQTRADE_STRATEGY:-LlmRotationAlignedStrategy}
 
   scheduler:
     image: freqtradeorg/freqtrade:stable
@@ -205,21 +228,25 @@ services:
     working_dir: /workspace
     environment:
       LLM_BOT_API_URL: http://bot-api:8000
+      FREQTRADE_STRATEGY: ${FREQTRADE_STRATEGY:-LlmRotationAlignedStrategy}
       STRATEGY_MODE: ${STRATEGY_MODE:-aggressive}
       LLM_ROTATE_LOOP_INTERVAL_MINUTES: ${LLM_ROTATE_LOOP_INTERVAL_MINUTES:-60}
       LLM_ROTATE_LOOP_JITTER_SECONDS: ${LLM_ROTATE_LOOP_JITTER_SECONDS:-0}
       LLM_ROTATE_AUTO_DISCOVER: ${LLM_ROTATE_AUTO_DISCOVER:-true}
-      LLM_ROTATE_DATA_SOURCE: ${LLM_ROTATE_DATA_SOURCE:-exchange}
+      LLM_ROTATE_DATA_SOURCE: ${LLM_ROTATE_DATA_SOURCE:-auto}
       LLM_ROTATE_EXCHANGE: ${LLM_ROTATE_EXCHANGE:-binance}
       LLM_ROTATE_QUOTE: ${LLM_ROTATE_QUOTE:-USDT}
       LLM_ROTATE_TOP_N: ${LLM_ROTATE_TOP_N:-6}
       LLM_ROTATE_MIN_CONFIDENCE: ${LLM_ROTATE_MIN_CONFIDENCE:-0.60}
-      LLM_ROTATE_ALLOWED_RISK: ${LLM_ROTATE_ALLOWED_RISK:-low medium}
-      LLM_ROTATE_ALLOWED_REGIMES: ${LLM_ROTATE_ALLOWED_REGIMES:-trend_pullback}
+      LLM_ROTATE_ALLOWED_RISK: ${LLM_ROTATE_ALLOWED_RISK:-low medium high}
+      LLM_ROTATE_ALLOWED_REGIMES: ${LLM_ROTATE_ALLOWED_REGIMES:-trend_pullback breakout mean_reversion}
       LLM_ROTATE_MAX_CANDIDATES: ${LLM_ROTATE_MAX_CANDIDATES:-20}
+      LLM_ROTATE_MAX_EXCHANGE_FALLBACKS: ${LLM_ROTATE_MAX_EXCHANGE_FALLBACKS:-6}
+      LLM_ROTATE_EXCHANGE_TIMEOUT_MS: ${LLM_ROTATE_EXCHANGE_TIMEOUT_MS:-8000}
       LLM_ROTATE_MIN_QUOTE_VOLUME: ${LLM_ROTATE_MIN_QUOTE_VOLUME:-20000000}
       LLM_ROTATE_EXCLUDE_REGEX: ${LLM_ROTATE_EXCLUDE_REGEX:-}
       LLM_ROTATE_USE_SPIKE_BIAS: ${LLM_ROTATE_USE_SPIKE_BIAS:-false}
+      LLM_ROTATE_SPIKE_DB_URL: ${LLM_ROTATE_SPIKE_DB_URL:-}
       LLM_ROTATE_SPIKE_DB_PATH: ${LLM_ROTATE_SPIKE_DB_PATH:-./freqtrade/user_data/logs/spike-scanner.sqlite}
       LLM_ROTATE_SPIKE_LOOKBACK_HOURS: ${LLM_ROTATE_SPIKE_LOOKBACK_HOURS:-48}
       LLM_ROTATE_SPIKE_TOP_N: ${LLM_ROTATE_SPIKE_TOP_N:-4}
@@ -234,6 +261,7 @@ services:
       LLM_ROTATE_EXCLUDED_BASES: ${LLM_ROTATE_EXCLUDED_BASES:-USDC USDT FDUSD TUSD USDP BUSD DAI EUR USD1}
       LLM_ROTATE_MIN_ATR_PCT: ${LLM_ROTATE_MIN_ATR_PCT:-0}
       LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE: ${LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE:-0.35}
+      LLM_ROTATE_OUTCOME_DB_URL: ${LLM_ROTATE_OUTCOME_DB_URL:-}
       LLM_ROTATE_OUTCOME_DB_PATH: ${LLM_ROTATE_OUTCOME_DB_PATH:-./freqtrade/user_data/logs/rotation-outcomes.sqlite}
       LLM_ROTATE_OUTCOME_HORIZON_MINUTES: ${LLM_ROTATE_OUTCOME_HORIZON_MINUTES:-60}
       LLM_ROTATE_OUTCOME_SUCCESS_PCT: ${LLM_ROTATE_OUTCOME_SUCCESS_PCT:-1.0}
@@ -250,7 +278,7 @@ services:
     command:
       - /bin/sh
       - -lc
-      - apk add --no-cache bash python3 py3-pip curl jq >/dev/null && exec bash ./scripts/rotate-risk-pairs-loop.sh --mode ${STRATEGY_MODE:-aggressive} --interval-minutes ${LLM_ROTATE_LOOP_INTERVAL_MINUTES:-60}
+      - apk add --no-cache bash python3 py3-pip py3-psycopg2 curl jq >/dev/null && exec bash ./scripts/rotate-risk-pairs-loop.sh --mode ${STRATEGY_MODE:-aggressive} --interval-minutes ${LLM_ROTATE_LOOP_INTERVAL_MINUTES:-60}
 
   policy-pivot:
     image: docker:cli
@@ -268,9 +296,10 @@ services:
       LLM_POLICY_INTERVAL_MINUTES: ${LLM_POLICY_INTERVAL_MINUTES:-15}
       LLM_POLICY_LOOKBACK_HOURS: ${LLM_POLICY_LOOKBACK_HOURS:-24}
       LLM_POLICY_HTTP_TIMEOUT_SECONDS: ${LLM_POLICY_HTTP_TIMEOUT_SECONDS:-45}
-      LLM_POLICY_TRADES_DB: ${LLM_POLICY_TRADES_DB:-./freqtrade/user_data/tradesv3.sqlite}
+      LLM_POLICY_TRADES_DB: ${LLM_POLICY_TRADES_DB:-${FREQTRADE_DB_URL:-./freqtrade/user_data/tradesv3.sqlite}}
       LLM_POLICY_OUTPUT_PATH: ${LLM_POLICY_OUTPUT_PATH:-./freqtrade/user_data/logs/llm-runtime-policy.json}
       LLM_POLICY_USE_SPIKE: ${LLM_POLICY_USE_SPIKE:-true}
+      LLM_POLICY_SPIKE_DB_URL: ${LLM_POLICY_SPIKE_DB_URL:-}
       LLM_POLICY_SPIKE_DB_PATH: ${LLM_POLICY_SPIKE_DB_PATH:-./freqtrade/user_data/logs/spike-scanner.sqlite}
       LLM_POLICY_ROTATION_LOG_PATH: ${LLM_POLICY_ROTATION_LOG_PATH:-./freqtrade/user_data/logs/llm-pair-rotation.log}
       TZ: ${TZ:-UTC}
@@ -279,7 +308,7 @@ services:
     command:
       - /bin/sh
       - -lc
-      - apk add --no-cache python3 >/dev/null && exec python3 ./scripts/llm-policy-loop.py
+      - apk add --no-cache python3 py3-psycopg2 >/dev/null && exec python3 ./scripts/llm-policy-loop.py
 
   spike-scanner:
     build: ./spike-scanner
@@ -289,6 +318,8 @@ services:
       - "${SPIKE_WEB_PUBLIC_PORT:-8091}:${SPIKE_WEB_PORT:-8090}"
     depends_on:
       bot-api:
+        condition: service_healthy
+      stack-postgres:
         condition: service_healthy
     environment:
       BINANCE_REST_BASE: ${BINANCE_REST_BASE:-https://api.binance.com}
@@ -313,6 +344,7 @@ services:
       SPIKE_ALERT_COOLDOWN_MINUTES: ${SPIKE_ALERT_COOLDOWN_MINUTES:-30}
       SPIKE_LOOP_SECONDS: ${SPIKE_LOOP_SECONDS:-5}
       SPIKE_LOG_PATH: ${SPIKE_LOG_PATH:-/data/spike-alerts.jsonl}
+      SPIKE_DB_URL: ${SPIKE_DB_URL:-}
       SPIKE_DB_PATH: ${SPIKE_DB_PATH:-/data/spike-scanner.sqlite}
       SPIKE_ROTATION_LOG_PATH: ${SPIKE_ROTATION_LOG_PATH:-/data/llm-pair-rotation.log}
       SPIKE_OUTCOME_HORIZONS_MINUTES: ${SPIKE_OUTCOME_HORIZONS_MINUTES:-60,240,1440,2880}
@@ -350,3 +382,4 @@ services:
 
 volumes:
   ollama_data:
+  stack_postgres_data:

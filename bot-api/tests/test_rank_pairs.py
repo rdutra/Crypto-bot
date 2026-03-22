@@ -201,6 +201,63 @@ class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(response.decisions[0].confidence, bot_main.FALLBACK_CONFIDENCE_CAP)
         self.assertIn("low_reliability", response.decisions[0].note)
 
+    async def test_rank_pairs_recovers_missing_batch_decisions(self) -> None:
+        req = bot_main.RankPairsRequest(
+            candidates=[
+                _sample_candidate(pair="XRP/USDT", deterministic_score=8.6),
+                _sample_candidate(pair="SOL/USDT", deterministic_score=6.6),
+            ],
+            allowed_risk_levels=["low", "medium", "high"],
+            allowed_regimes=["trend_pullback", "breakout", "mean_reversion"],
+        )
+
+        async def fake_run_llm(_: str) -> str:
+            return json.dumps(
+                {
+                    "decisions": [
+                        {
+                            "pair": "XRP/USDT",
+                            "regime": "trend_pullback",
+                            "risk_level": "low",
+                            "confidence": 0.95,
+                            "note": "batch ok",
+                        }
+                    ]
+                }
+            )
+
+        async def fake_rank_via_single(single_req: bot_main.RankPairsRequest) -> tuple[dict[str, bot_main.LlmRankDecision], int]:
+            self.assertEqual([candidate.pair for candidate in single_req.candidates], ["SOL/USDT"])
+            return (
+                {
+                    "SOL/USDT": bot_main.LlmRankDecision(
+                        pair="SOL/USDT",
+                        regime="trend_pullback",
+                        risk_level="low",
+                        confidence=0.9,
+                        note="single:recovered",
+                    )
+                },
+                1,
+            )
+
+        original_run_llm = bot_main._run_llm
+        original_single = bot_main._rank_via_single_classify
+        try:
+            bot_main._run_llm = fake_run_llm
+            bot_main._rank_via_single_classify = fake_rank_via_single
+            response = await bot_main.rank_pairs(req)
+        finally:
+            bot_main._run_llm = original_run_llm
+            bot_main._rank_via_single_classify = original_single
+
+        self.assertEqual(response.source, "llm")
+        self.assertEqual(response.reason, "batch_partial_recovered:2/2")
+        self.assertEqual(response.selected_pairs, ["XRP/USDT", "SOL/USDT"])
+        by_pair = {decision.pair: decision for decision in response.decisions}
+        self.assertEqual(by_pair["SOL/USDT"].note, "single:recovered")
+        self.assertNotEqual(by_pair["SOL/USDT"].note, "missing_pair_decision")
+
 
 if __name__ == "__main__":
     unittest.main()

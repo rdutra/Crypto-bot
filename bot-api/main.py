@@ -75,7 +75,10 @@ LLM_DEBUG_ENABLED = str(os.getenv("LLM_DEBUG_ENABLED", "true")).strip().lower() 
 LLM_DEBUG_MAX_ENTRIES = max(20, min(2000, int(os.getenv("LLM_DEBUG_MAX_ENTRIES", "250") or "250")))
 LLM_DEBUG_PROMPT_MAX_CHARS = max(200, min(50000, int(os.getenv("LLM_DEBUG_PROMPT_MAX_CHARS", "8000") or "8000")))
 LLM_DEBUG_RESPONSE_MAX_CHARS = max(200, min(50000, int(os.getenv("LLM_DEBUG_RESPONSE_MAX_CHARS", "8000") or "8000")))
-LLM_DEBUG_DB_PATH = os.getenv("LLM_DEBUG_DB_PATH", "/app/data/llm-debug.sqlite").strip() or "/app/data/llm-debug.sqlite"
+LLM_DEBUG_DB_PATH = os.getenv(
+    "LLM_DEBUG_DB_URL",
+    os.getenv("LLM_DEBUG_DB_PATH", "/app/data/llm-debug.sqlite"),
+).strip() or "/app/data/llm-debug.sqlite"
 LLM_DEBUG_DB_MAX_ROWS = max(1000, min(2_000_000, int(os.getenv("LLM_DEBUG_DB_MAX_ROWS", "50000") or "50000")))
 LLM_CALL_LOG: deque[dict[str, Any]] = deque(maxlen=LLM_DEBUG_MAX_ENTRIES)
 LLM_CALL_LOCK = Lock()
@@ -345,7 +348,27 @@ def _rank_fallback(
     market_rank_context: Dict[str, dict] | None = None,
     trading_signal_context: Dict[str, dict] | None = None,
 ) -> RankPairsResponse:
-    market_rank_context = market_rank_context or {}
+    parsed = _fallback_rank_decisions(
+        req=req,
+        trading_signal_context=trading_signal_context,
+    )
+
+    return _rank_response(
+        req=req,
+        parsed=parsed,
+        source="fallback",
+        reason=reason,
+        market_rank_meta=market_rank_meta or {},
+        trading_signal_meta=trading_signal_meta or {},
+        market_rank_context=market_rank_context,
+        trading_signal_context=trading_signal_context,
+    )
+
+
+def _fallback_rank_decisions(
+    req: RankPairsRequest,
+    trading_signal_context: Dict[str, dict] | None = None,
+) -> Dict[str, LlmRankDecision]:
     trading_signal_context = trading_signal_context or {}
     fallback_smart_buy_min_score = float(os.getenv("LLM_FALLBACK_SMART_BUY_MIN_SCORE", "0.75"))
 
@@ -381,16 +404,7 @@ def _rank_fallback(
             note=note,
         )
 
-    return _rank_response(
-        req=req,
-        parsed=parsed,
-        source="fallback",
-        reason=reason,
-        market_rank_meta=market_rank_meta or {},
-        trading_signal_meta=trading_signal_meta or {},
-        market_rank_context=market_rank_context,
-        trading_signal_context=trading_signal_context,
-    )
+    return parsed
 
 
 def _policy_fallback(req: RuntimePolicyRequest, reason: str) -> RuntimePolicyDecision:
@@ -523,6 +537,11 @@ async def _rank_via_single_classify(req: RankPairsRequest) -> tuple[Dict[str, Ll
         success_count += 1
 
     return parsed, success_count
+
+
+def _missing_rank_candidates(req: RankPairsRequest, parsed: Dict[str, LlmRankDecision]) -> list[PairCandidate]:
+    decided = {key.upper() for key in parsed}
+    return [candidate for candidate in req.candidates if candidate.pair.upper() not in decided]
 
 async def _run_llm(prompt: str) -> str:
     return await LLM_CLIENT.run(prompt)
@@ -721,6 +740,37 @@ async def rank_pairs(req: RankPairsRequest) -> RankPairsResponse:
         parse_reason = f"single_classify_ok:{success_count}/{len(req.candidates)}"
         logger.info("rank-pairs recovered via single classify: %s", parse_reason)
     else:
+        missing = _missing_rank_candidates(req, parsed)
+        if missing:
+            recovered, success_count = await _rank_via_single_classify(
+                RankPairsRequest(
+                    candidates=missing,
+                    top_n=min(req.top_n, len(missing)),
+                    min_confidence=req.min_confidence,
+                    allowed_risk_levels=req.allowed_risk_levels,
+                    allowed_regimes=req.allowed_regimes,
+                )
+            )
+            if recovered:
+                parsed.update(recovered)
+            missing_after_single = _missing_rank_candidates(req, parsed)
+            if missing_after_single:
+                fallback_fill = _fallback_rank_decisions(
+                    req=RankPairsRequest(
+                        candidates=missing_after_single,
+                        top_n=min(req.top_n, len(missing_after_single)),
+                        min_confidence=req.min_confidence,
+                        allowed_risk_levels=req.allowed_risk_levels,
+                        allowed_regimes=req.allowed_regimes,
+                    ),
+                    trading_signal_context=trading_signal_context,
+                )
+                parsed.update(fallback_fill)
+            parse_reason = (
+                f"batch_partial_recovered:{len(req.candidates) - len(missing_after_single)}/{len(req.candidates)}"
+                if missing
+                else "batch_ok"
+            )
         logger.info("rank-pairs batch parse success: %s decisions", len(parsed))
 
     return _rank_response(
@@ -774,5 +824,5 @@ async def debug_llm_calls(limit: int = 50, endpoint: str | None = None) -> dict[
         return {"items": [], "total": 0, "enabled": False, "storage": "disabled"}
     limit = max(1, min(500, int(limit)))
     items, total = _dump_llm_calls(limit=limit, endpoint=endpoint)
-    storage = "sqlite" if LLM_DEBUG_STORE.available else "memory"
+    storage = LLM_DEBUG_STORE.storage_kind
     return {"items": items, "total": total, "enabled": True, "storage": storage}

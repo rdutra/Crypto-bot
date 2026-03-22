@@ -10,7 +10,9 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
+from spike_db import collect_spike_allowed_rate, normalize_postgres_target
 
 LOGGER = logging.getLogger("llm-policy-loop")
 
@@ -40,7 +42,12 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _collect_trade_stats(db_path: Path, lookback_hours: float) -> dict[str, Any]:
+def _is_postgres_db(target: str) -> bool:
+    scheme = urlparse(target).scheme.lower()
+    return scheme.startswith("postgres")
+
+
+def _collect_trade_stats_sqlite(db_path: Path, lookback_hours: float) -> dict[str, Any]:
     stats = {
         "closed_trades": 0,
         "open_trades": 0,
@@ -100,33 +107,71 @@ def _collect_trade_stats(db_path: Path, lookback_hours: float) -> dict[str, Any]
     return stats
 
 
-def _collect_spike_rate(db_path: Path, lookback_hours: float) -> Optional[float]:
-    if not db_path.exists():
-        return None
-    cutoff = (_utc_now() - timedelta(hours=lookback_hours)).isoformat()
+def _collect_trade_stats_postgres(db_url: str, lookback_hours: float) -> dict[str, Any]:
+    stats = {
+        "closed_trades": 0,
+        "open_trades": 0,
+        "wins": 0,
+        "win_rate": 0.0,
+        "avg_profit_pct": 0.0,
+        "net_profit_pct": 0.0,
+        "max_drawdown_pct": 0.0,
+        "market_note": "",
+    }
+    cutoff = _utc_now() - timedelta(hours=lookback_hours)
     try:
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        row = cur.execute(
+        import psycopg2
+        import psycopg2.extras
+
+        conn = psycopg2.connect(normalize_postgres_target(db_url))
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
             """
             SELECT
-                COUNT(*) AS total,
-                COALESCE(SUM(CASE WHEN llm_allowed = 1 THEN 1 ELSE 0 END), 0) AS allowed
-            FROM llm_shadow_evals
-            WHERE julianday(ts) >= julianday(?)
+                COUNT(*) AS closed_trades,
+                COALESCE(SUM(CASE WHEN close_profit > 0 THEN 1 ELSE 0 END), 0) AS wins,
+                COALESCE(AVG(close_profit), 0.0) AS avg_profit_ratio,
+                COALESCE(SUM(close_profit), 0.0) AS net_profit_ratio,
+                COALESCE(MIN(close_profit), 0.0) AS min_profit_ratio
+            FROM trades
+            WHERE is_open = false
+              AND close_date IS NOT NULL
+              AND close_date >= %s
             """,
             (cutoff,),
-        ).fetchone()
+        )
+        row = cur.fetchone() or {}
+        cur.execute("SELECT COUNT(*) AS open_trades FROM trades WHERE is_open = true")
+        open_row = cur.fetchone() or {}
+        cur.close()
         conn.close()
-    except Exception:
-        return None
+    except Exception as exc:
+        stats["market_note"] = f"trades_query_error:{str(exc)[:60]}"
+        return stats
 
-    total = _safe_int(row["total"])
-    allowed = _safe_int(row["allowed"])
-    if total <= 0:
-        return None
-    return max(0.0, min(1.0, allowed / total))
+    closed = _safe_int(row.get("closed_trades"))
+    wins = _safe_int(row.get("wins"))
+    avg_profit_ratio = _safe_float(row.get("avg_profit_ratio"))
+    net_profit_ratio = _safe_float(row.get("net_profit_ratio"))
+    min_profit_ratio = _safe_float(row.get("min_profit_ratio"))
+    open_trades = _safe_int(open_row.get("open_trades"))
+
+    stats["closed_trades"] = closed
+    stats["wins"] = wins
+    stats["open_trades"] = open_trades
+    stats["win_rate"] = (wins / closed) if closed > 0 else 0.0
+    stats["avg_profit_pct"] = avg_profit_ratio * 100.0
+    stats["net_profit_pct"] = net_profit_ratio * 100.0
+    stats["max_drawdown_pct"] = min(0.0, min_profit_ratio * 100.0)
+    if closed <= 0:
+        stats["market_note"] = "no_recent_closed_trades"
+    return stats
+
+
+def _collect_trade_stats(db_target: str, lookback_hours: float) -> dict[str, Any]:
+    if _is_postgres_db(db_target):
+        return _collect_trade_stats_postgres(db_target, lookback_hours)
+    return _collect_trade_stats_sqlite(Path(db_target), lookback_hours)
 
 
 def _collect_rotation_metrics(log_path: Path, lookback_hours: float) -> Optional[dict[str, Any]]:
@@ -336,15 +381,15 @@ def _write_policy(path: Path, payload: dict[str, Any]) -> None:
 
 def _run_once(
     bot_api_url: str,
-    trades_db_path: Path,
+    trades_db_target: str,
     output_path: Path,
     lookback_hours: float,
     timeout_seconds: float,
     use_spike: bool,
-    spike_db_path: Path,
+    spike_db_target: str,
     rotation_log_path: Path,
 ) -> None:
-    trade_stats = _collect_trade_stats(trades_db_path, lookback_hours)
+    trade_stats = _collect_trade_stats(trades_db_target, lookback_hours)
     payload = {
         "lookback_hours": lookback_hours,
         "closed_trades": int(trade_stats["closed_trades"]),
@@ -357,7 +402,7 @@ def _run_once(
     }
 
     if use_spike:
-        spike_allowed_rate = _collect_spike_rate(spike_db_path, lookback_hours)
+        spike_allowed_rate = collect_spike_allowed_rate(spike_db_target, lookback_hours)
         if spike_allowed_rate is not None:
             payload["spike_allowed_rate"] = float(spike_allowed_rate)
 
@@ -399,7 +444,7 @@ def main() -> int:
     timeout_seconds = max(2.0, min(120.0, _safe_float(os.getenv("LLM_POLICY_HTTP_TIMEOUT_SECONDS", "45"), 45.0)))
 
     bot_api_url = os.getenv("LLM_BOT_API_URL", "http://bot-api:8000").strip() or "http://bot-api:8000"
-    trades_db_path = Path(
+    trades_db_target = (
         os.getenv("LLM_POLICY_TRADES_DB", "./freqtrade/user_data/tradesv3.sqlite").strip()
         or "./freqtrade/user_data/tradesv3.sqlite"
     )
@@ -408,8 +453,11 @@ def main() -> int:
         or "./freqtrade/user_data/logs/llm-runtime-policy.json"
     )
     use_spike = _env_bool("LLM_POLICY_USE_SPIKE", True)
-    spike_db_path = Path(
-        os.getenv("LLM_POLICY_SPIKE_DB_PATH", "./freqtrade/user_data/logs/spike-scanner.sqlite").strip()
+    spike_db_target = (
+        os.getenv(
+            "LLM_POLICY_SPIKE_DB_URL",
+            os.getenv("LLM_POLICY_SPIKE_DB_PATH", "./freqtrade/user_data/logs/spike-scanner.sqlite"),
+        ).strip()
         or "./freqtrade/user_data/logs/spike-scanner.sqlite"
     )
     rotation_log_path = Path(
@@ -435,12 +483,12 @@ def main() -> int:
     while True:
         _run_once(
             bot_api_url=bot_api_url,
-            trades_db_path=trades_db_path,
+            trades_db_target=trades_db_target,
             output_path=output_path,
             lookback_hours=lookback_hours,
             timeout_seconds=timeout_seconds,
             use_spike=use_spike,
-            spike_db_path=spike_db_path,
+            spike_db_target=spike_db_target,
             rotation_log_path=rotation_log_path,
         )
 

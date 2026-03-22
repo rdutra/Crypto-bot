@@ -99,6 +99,11 @@ After changing `.env` strategy values, recreate `freqtrade` to apply them:
 docker compose up -d --force-recreate freqtrade scheduler pair-rotator policy-pivot
 ```
 
+Strategy selection:
+
+- `FREQTRADE_STRATEGY=LlmRotationAlignedStrategy` is the current default and matches the higher-risk / mean-reversion rotator output more closely
+- `FREQTRADE_STRATEGY=LlmTrendPullbackStrategy` keeps the stricter trend-following execution logic if you want the conservative baseline
+
 Dry-run with risk-pair rotation before startup:
 
 ```bash
@@ -254,10 +259,10 @@ Alert output file (JSONL):
 tail -f freqtrade/user_data/logs/spike-alerts.jsonl
 ```
 
-Prediction database (SQLite):
+Prediction database target:
 
 ```bash
-ls -lh freqtrade/user_data/logs/spike-scanner.sqlite
+docker exec stack-postgres psql -U stack -d spike_scanner -c "SELECT COUNT(*) FROM alerts;"
 ```
 
 Optional notifications (Telegram/Discord) are sent on startup and each alert when configured.
@@ -289,6 +294,7 @@ Notes:
 Core strategy:
 
 - `STRATEGY_MODE=conservative|aggressive`
+- `FREQTRADE_STRATEGY=LlmTrendPullbackStrategy|LlmRotationAlignedStrategy`
 - `ENABLE_LLM_FILTER=true|false`
 - `LLM_MIN_CONFIDENCE=0.65`
 - `LLM_CONNECT_TIMEOUT_SECONDS=2`
@@ -306,7 +312,8 @@ Core strategy:
 - `OLLAMA_BASE_URL=http://host.docker.internal:11434` uses host-installed Ollama; set `http://ollama:11434` only if you want the dockerized Ollama service
 - `LLM_FAIL_OPEN=true` recommended in live/dry-run to avoid blocking entries when LLM is temporarily unavailable
 - `LLM_DEBUG_ENABLED=true`, `LLM_DEBUG_MAX_ENTRIES=250` (in-memory hot cache)
-- `LLM_DEBUG_DB_PATH=/app/data/llm-debug.sqlite`, `LLM_DEBUG_DB_MAX_ROWS=50000` (persistent debug history in sqlite)
+- `LLM_DEBUG_DB_URL=postgresql+psycopg2://stack:stack@stack-postgres:5432/stack_analytics`, `LLM_DEBUG_DB_MAX_ROWS=50000` (preferred persistent debug history backend)
+- `LLM_DEBUG_DB_PATH=/app/data/llm-debug.sqlite` (SQLite fallback / migration source)
 - `LLM_MARKET_RANK_SKILL_ENABLED=true|false` (inject Binance market-rank context into `/rank-pairs` prompts)
 - `LLM_MARKET_RANK_BASE_URL=https://web3.binance.com`
 - `LLM_MARKET_RANK_TIMEOUT_SECONDS=6`, `LLM_MARKET_RANK_CACHE_SECONDS=300`
@@ -361,15 +368,18 @@ LLM rotation:
 - `LLM_ROTATE_EXCLUDE_REGEX=(UP|DOWN|BULL|BEAR|1000|[0-9][0-9][0-9]+L|[0-9][0-9][0-9]+S)`
 - `LLM_ROTATE_TOP_N=6`
 - `LLM_ROTATE_MIN_CONFIDENCE=0.60`
-- `LLM_ROTATE_ALLOWED_RISK=low medium`
-- `LLM_ROTATE_ALLOWED_REGIMES=trend_pullback` (aggressive default in script: `trend_pullback breakout mean_reversion`)
+- `LLM_ROTATE_ALLOWED_RISK=low medium high`
+- `LLM_ROTATE_ALLOWED_REGIMES=trend_pullback breakout mean_reversion`
+- `LLM_ROTATE_MAX_EXCHANGE_FALLBACKS=6`
+- `LLM_ROTATE_EXCHANGE_TIMEOUT_MS=8000`
 - `LLM_ROTATE_SYNC_WHITELIST=true`
 - `LLM_ROTATE_SOURCE_DIVERSITY_ENABLED=true` (reserve part of the final basket for Binance-skill, algo, and spike sources)
 - `LLM_ROTATE_MIN_BINANCE_SKILL_PAIRS=2`
 - `LLM_ROTATE_MIN_ALGO_PAIRS=2`
 - `LLM_ROTATE_MIN_SPIKE_PAIRS=1`
 - `LLM_ROTATE_USE_SPIKE_BIAS=true|false` (prepend recent high-score scanner symbols into rotation candidates)
-- `LLM_ROTATE_SPIKE_DB_PATH=./freqtrade/user_data/logs/spike-scanner.sqlite`
+- `LLM_ROTATE_SPIKE_DB_URL=postgresql+psycopg2://stack:stack@stack-postgres:5432/spike_scanner` (preferred)
+- `LLM_ROTATE_SPIKE_DB_PATH=./freqtrade/user_data/logs/spike-scanner.sqlite` (SQLite fallback / migration source)
 - `LLM_ROTATE_SPIKE_LOOKBACK_HOURS=48`
 - `LLM_ROTATE_SPIKE_TOP_N=6`
 - `LLM_ROTATE_SPIKE_MIN_SCORE=0.68`
@@ -383,22 +393,29 @@ LLM rotation:
 - `LLM_ROTATE_EXCLUDED_BASES=USDC USDT FDUSD TUSD USDP BUSD DAI EUR USD1` (drop obvious low-opportunity bases from the risk basket)
 - `LLM_ROTATE_MIN_ATR_PCT=0` and `LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE=0.35` (reject low-ATR names before ranking; this keeps pairs like `USDC/USDT` out of aggressive rotation)
 - `LLM_ROTATE_LOG_PATH=./freqtrade/user_data/logs/llm-pair-rotation.log`
-- `LLM_ROTATE_OUTCOME_DB_PATH=./freqtrade/user_data/logs/rotation-outcomes.sqlite`
+- `LLM_ROTATE_OUTCOME_DB_URL=postgresql+psycopg2://stack:stack@stack-postgres:5432/stack_analytics` (preferred)
+- `LLM_ROTATE_OUTCOME_DB_PATH=./freqtrade/user_data/logs/rotation-outcomes.sqlite` (SQLite fallback / migration source)
 - `LLM_ROTATE_OUTCOME_HORIZON_MINUTES=60`
 - `LLM_ROTATE_OUTCOME_SUCCESS_PCT=1.0` (used to classify selected/rejected rotation decisions into true/false positive/negative after the horizon passes)
 - `LLM_ROTATE_LOOP_INTERVAL_MINUTES=60` (used by `rotate-risk-pairs-loop.sh`)
 - `LLM_ROTATE_LOOP_JITTER_SECONDS=0` (optional random delay before each cycle)
+
+Postgres admin:
+
+- `./scripts/stack-postgres-admin.sh check`
+- `./scripts/stack-postgres-admin.sh backup`
 
 LLM runtime policy loop:
 
 - `LLM_POLICY_LOOP_ENABLED=true|false`
 - `LLM_POLICY_INTERVAL_MINUTES=15`
 - `LLM_POLICY_LOOKBACK_HOURS=24`
-- `LLM_POLICY_HTTP_TIMEOUT_SECONDS=20`
-- `LLM_POLICY_TRADES_DB=./freqtrade/user_data/tradesv3.sqlite`
+- `LLM_POLICY_HTTP_TIMEOUT_SECONDS=45`
+- `LLM_POLICY_TRADES_DB=postgresql+psycopg2://stack:stack@stack-postgres:5432/freqtrade`
 - `LLM_POLICY_OUTPUT_PATH=./freqtrade/user_data/logs/llm-runtime-policy.json`
 - `LLM_POLICY_USE_SPIKE=true|false`
-- `LLM_POLICY_SPIKE_DB_PATH=./freqtrade/user_data/logs/spike-scanner.sqlite`
+- `LLM_POLICY_SPIKE_DB_URL=postgresql+psycopg2://stack:stack@stack-postgres:5432/spike_scanner` (preferred)
+- `LLM_POLICY_SPIKE_DB_PATH=./freqtrade/user_data/logs/spike-scanner.sqlite` (SQLite fallback / migration source)
 
 Scheduler:
 
@@ -431,7 +448,8 @@ Spike scanner:
 - `SPIKE_ALERT_COOLDOWN_MINUTES=30`
 - `SPIKE_LOOP_SECONDS=5`
 - `SPIKE_LOG_PATH=/data/spike-alerts.jsonl`
-- `SPIKE_DB_PATH=/data/spike-scanner.sqlite`
+- `SPIKE_DB_URL=postgresql+psycopg2://stack:stack@stack-postgres:5432/spike_scanner` (preferred)
+- `SPIKE_DB_PATH=/data/spike-scanner.sqlite` (SQLite fallback / migration source)
 - `SPIKE_OUTCOME_HORIZONS_MINUTES=60,240,1440,2880`
 - `SPIKE_OUTCOME_LOOP_SECONDS=30`
 - `SPIKE_OUTCOME_BATCH_SIZE=200`
