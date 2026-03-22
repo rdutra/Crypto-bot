@@ -76,33 +76,34 @@ class LlmHybridStrategy(LlmRotationAlignedStrategy):
             | (dataframe["high"] >= dataframe["breakout_high_24"].shift(1) * thresholds["breakout_buffer"])
         )
         reclaim_ema20 = dataframe["close"] >= dataframe["ema20"] * thresholds["ema20_reclaim"]
-        adx_or_spread_ok = (
-            (dataframe["adx"] >= thresholds["adx_min"])
-            | (dataframe["ema_spread_pct"] >= thresholds["ema_spread_min"])
-        )
-        volume_ok = (
-            (dataframe["volume"] > dataframe["vol_ma20"] * thresholds["vol_mult_min"])
-            | (dataframe["volume_z"] >= thresholds["vol_z_min"])
-        )
         trend_ok = (
             ((dataframe[trend_col] == 1) & (dataframe["close"] >= dataframe["ema50"] * thresholds["ema50_proximity"]))
             | (dataframe["ema20"] >= dataframe["ema50"] * 0.995)
             | (dataframe["close"] > dataframe["ema200"] * 0.985)
         )
+        trigger_ok = (
+            (breakout_ready | reclaim_ema20)
+            & (dataframe["candle_body_pct"] >= thresholds["body_pct_min"])
+            & (dataframe["close"] >= dataframe["ema50"] * thresholds["pullback_floor"])
+        )
+        momentum_ok = (
+            (dataframe["adx"] >= thresholds["adx_min"])
+            | (dataframe["ema_spread_pct"] >= thresholds["ema_spread_min"])
+        )
+        rsi_ok = (dataframe["rsi"] >= thresholds["rsi_min"]) & (dataframe["rsi"] <= thresholds["rsi_max"])
+        atr_ok = (dataframe["atr_pct"] >= thresholds["atr_min"]) & (dataframe["atr_pct"] <= thresholds["atr_max"])
+        volume_ok = (
+            (dataframe["volume"] > dataframe["vol_ma20"] * thresholds["vol_mult_min"])
+            | (dataframe["volume_z"] >= thresholds["vol_z_min"])
+        )
 
         entry_checks: Dict[str, Any] = {
-            "close_gt_ema20": dataframe["close"] >= dataframe["ema20"],
-            "reclaim_ema20": reclaim_ema20,
-            "breakout_ready": breakout_ready,
-            "rsi_min": dataframe["rsi"] >= thresholds["rsi_min"],
-            "rsi_max": dataframe["rsi"] <= thresholds["rsi_max"],
-            "adx_or_spread": adx_or_spread_ok,
-            "atr_min": dataframe["atr_pct"] >= thresholds["atr_min"],
-            "atr_max": dataframe["atr_pct"] <= thresholds["atr_max"],
-            "pullback_floor": dataframe["close"] >= dataframe["ema50"] * thresholds["pullback_floor"],
-            "volume_ok": volume_ok,
-            "body_pct_min": dataframe["candle_body_pct"] >= thresholds["body_pct_min"],
             "trend_ok": trend_ok,
+            "trigger_ok": trigger_ok,
+            "momentum_ok": momentum_ok,
+            "rsi_ok": rsi_ok,
+            "atr_ok": atr_ok,
+            "volume_ok": volume_ok,
         }
 
         deterministic_entry = dataframe["close"] > 0

@@ -19,6 +19,43 @@ STRATEGY_MODE = os.getenv("STRATEGY_MODE", "conservative").strip().lower()
 if STRATEGY_MODE not in VALID_STRATEGY_MODES:
     STRATEGY_MODE = "conservative"
 
+STRATEGY_PROFILE_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "aggressive": {
+        "benchmark_chaos_adx": 16.0,
+        "benchmark_min_spread_pct": -0.05,
+        "benchmark_risk_stake_mult_when_weak": 0.6,
+        "benchmark_core_stake_mult_when_weak": 0.85,
+        "stale_trade_hours": 24.0,
+        "stale_min_profit": 0.01,
+        "stale_loss_hours": 12.0,
+        "stale_loss_pct": -0.02,
+        "stale_max_hours": 72.0,
+        "custom_sl_atr_mult": 1.6,
+        "custom_sl_max": -0.007,
+        "risk_thresholds": {
+            "strict": {"adx_min": 18.0, "atr_max": 6.0, "ema_spread_min": 0.0},
+            "normal": {"adx_min": 16.0, "atr_max": 6.0, "ema_spread_min": -0.03},
+        },
+    },
+    "conservative": {
+        "benchmark_chaos_adx": 18.0,
+        "benchmark_min_spread_pct": 0.0,
+        "benchmark_risk_stake_mult_when_weak": 0.6,
+        "benchmark_core_stake_mult_when_weak": 0.85,
+        "stale_trade_hours": 40.0,
+        "stale_min_profit": 0.006,
+        "stale_loss_hours": 18.0,
+        "stale_loss_pct": -0.015,
+        "stale_max_hours": 120.0,
+        "custom_sl_atr_mult": 1.3,
+        "custom_sl_max": -0.009,
+        "risk_thresholds": {
+            "strict": {"adx_min": 26.0, "atr_max": 3.4, "ema_spread_min": 0.25},
+            "normal": {"adx_min": 26.0, "atr_max": 3.4, "ema_spread_min": 0.25},
+        },
+    },
+}
+
 
 def _env_bool(key: str, default: bool) -> bool:
     value = os.getenv(key)
@@ -186,25 +223,22 @@ class LlmTrendPullbackStrategy(IStrategy):
         return _env_bool("BENCHMARK_FILTER_FOR_RISK", True)
 
     def _benchmark_allow_neutral_for_risk(self) -> bool:
-        default = not self._aggr_entry_is_strict()
-        return _env_bool("BENCHMARK_ALLOW_NEUTRAL_FOR_RISK", default)
+        return not self._aggr_entry_is_strict()
 
     def _benchmark_chaos_adx(self) -> float:
-        default = 16.0 if self._is_aggressive() else 18.0
-        return self._float_env("BENCHMARK_CHAOS_ADX", default, 8.0, 40.0)
+        return float(STRATEGY_PROFILE_DEFAULTS[STRATEGY_MODE]["benchmark_chaos_adx"])
 
     def _benchmark_min_spread_pct(self) -> float:
-        default = -0.05 if self._is_aggressive() else 0.0
-        return self._float_env("BENCHMARK_MIN_SPREAD_PCT", default, -1.0, 2.0)
+        return float(STRATEGY_PROFILE_DEFAULTS[STRATEGY_MODE]["benchmark_min_spread_pct"])
 
     def _benchmark_reduce_stake_when_weak(self) -> bool:
-        return _env_bool("BENCHMARK_REDUCE_STAKE_WHEN_WEAK", True)
+        return True
 
     def _benchmark_risk_stake_mult_when_weak(self) -> float:
-        return self._float_env("BENCHMARK_RISK_STAKE_MULT_WHEN_WEAK", 0.6, 0.1, 1.0)
+        return float(STRATEGY_PROFILE_DEFAULTS[STRATEGY_MODE]["benchmark_risk_stake_mult_when_weak"])
 
     def _benchmark_core_stake_mult_when_weak(self) -> float:
-        return self._float_env("BENCHMARK_CORE_STAKE_MULT_WHEN_WEAK", 0.85, 0.1, 1.0)
+        return float(STRATEGY_PROFILE_DEFAULTS[STRATEGY_MODE]["benchmark_core_stake_mult_when_weak"])
 
     def _is_risk_pair(self, pair: str) -> bool:
         return self._pair_symbol(pair) in self._risk_pairs()
@@ -520,39 +554,31 @@ class LlmTrendPullbackStrategy(IStrategy):
         return self._float_env("ENTRY_MIN_SCORE", default, 0.1, 0.95)
 
     def _exit_use_rsi_take(self) -> bool:
-        return _env_bool("EXIT_USE_RSI_TAKE", False)
+        return False
 
     def _stale_trade_hours(self) -> float:
-        default = 24.0 if self._is_aggressive() else 40.0
-        return self._float_env("STALE_TRADE_HOURS", default, 2.0, 240.0)
+        return float(STRATEGY_PROFILE_DEFAULTS[STRATEGY_MODE]["stale_trade_hours"])
 
     def _stale_min_profit(self) -> float:
-        default = 0.01 if self._is_aggressive() else 0.006
-        return self._float_env("STALE_MIN_PROFIT", default, -0.02, 0.05)
+        return float(STRATEGY_PROFILE_DEFAULTS[STRATEGY_MODE]["stale_min_profit"])
 
     def _stale_loss_hours(self) -> float:
-        default = 12.0 if self._is_aggressive() else 18.0
-        return self._float_env("STALE_LOSS_HOURS", default, 1.0, 120.0)
+        return float(STRATEGY_PROFILE_DEFAULTS[STRATEGY_MODE]["stale_loss_hours"])
 
     def _stale_loss_pct(self) -> float:
-        default = -0.02 if self._is_aggressive() else -0.015
-        return self._float_env("STALE_LOSS_PCT", default, -0.2, -0.001)
+        return float(STRATEGY_PROFILE_DEFAULTS[STRATEGY_MODE]["stale_loss_pct"])
 
     def _stale_max_hours(self) -> float:
-        default = 72.0 if self._is_aggressive() else 120.0
-        return self._float_env("STALE_MAX_HOURS", default, 4.0, 720.0)
+        return float(STRATEGY_PROFILE_DEFAULTS[STRATEGY_MODE]["stale_max_hours"])
 
     def _custom_sl_atr_mult(self) -> float:
-        default = 1.6 if self._is_aggressive() else 1.3
-        return self._float_env("CUSTOM_SL_ATR_MULT", default, 0.5, 4.0)
+        return float(STRATEGY_PROFILE_DEFAULTS[STRATEGY_MODE]["custom_sl_atr_mult"])
 
     def _custom_sl_min(self) -> float:
-        default = self.stoploss
-        return self._float_env("CUSTOM_SL_MIN", default, -0.2, -0.01)
+        return self.stoploss
 
     def _custom_sl_max(self) -> float:
-        default = -0.007 if self._is_aggressive() else -0.009
-        return self._float_env("CUSTOM_SL_MAX", default, -0.1, -0.001)
+        return float(STRATEGY_PROFILE_DEFAULTS[STRATEGY_MODE]["custom_sl_max"])
 
     def _is_live_like(self) -> bool:
         runmode = getattr(getattr(self, "dp", None), "runmode", None)
@@ -758,28 +784,32 @@ class LlmTrendPullbackStrategy(IStrategy):
 
     def _entry_thresholds(self, pair: str) -> Dict[str, float]:
         if self._is_risk_pair(pair):
+            risk_defaults = STRATEGY_PROFILE_DEFAULTS[STRATEGY_MODE]["risk_thresholds"]
             if self._is_aggressive():
                 strict = self._aggr_entry_is_strict()
+                profile_key = "strict" if strict else "normal"
+                active_defaults = risk_defaults[profile_key]
                 return {
                     "rsi_min": 38.0,
                     "rsi_max": 66.0,
-                    "adx_min": self._float_env("RISK_ADX_MIN", 18.0 if strict else 14.0, 10.0, 35.0),
+                    "adx_min": float(active_defaults["adx_min"]),
                     "atr_min": 0.4,
-                    "atr_max": self._float_env("RISK_ATR_MAX", 6.0, 1.2, 9.0),
-                    "ema_spread_min": self._float_env("RISK_EMA_SPREAD_MIN", 0.0 if strict else -0.05, -0.4, 1.5),
+                    "atr_max": float(active_defaults["atr_max"]),
+                    "ema_spread_min": float(active_defaults["ema_spread_min"]),
                     "ema20_overext": 1.05,
                     "pullback_floor": 0.94,
                     "vol_mult_min": 0.45 if strict else 0.35,
                     "vol_z_min": -1.8,
                     "rebound_over_prev": 0.995,
                 }
+            active_defaults = risk_defaults["strict"]
             return {
                 "rsi_min": 46.0,
                 "rsi_max": 56.0,
-                "adx_min": self._float_env("RISK_ADX_MIN", 26.0, 18.0, 45.0),
+                "adx_min": float(active_defaults["adx_min"]),
                 "atr_min": 1.1,
-                "atr_max": self._float_env("RISK_ATR_MAX", 3.4, 1.5, 6.0),
-                "ema_spread_min": self._float_env("RISK_EMA_SPREAD_MIN", 0.25, 0.05, 1.0),
+                "atr_max": float(active_defaults["atr_max"]),
+                "ema_spread_min": float(active_defaults["ema_spread_min"]),
                 "ema20_overext": 1.01,
                 "pullback_floor": 0.98,
                 "vol_mult_min": 1.0,
@@ -1121,61 +1151,53 @@ class LlmTrendPullbackStrategy(IStrategy):
             & (dataframe["close"] > dataframe["ema20"])
         )
 
+        rsi_ok = (dataframe["rsi"] >= thresholds["rsi_min"]) & (dataframe["rsi"] <= thresholds["rsi_max"])
+        atr_ok = (dataframe["atr_pct"] >= thresholds["atr_min"]) & (dataframe["atr_pct"] <= thresholds["atr_max"])
+        volume_ok = (
+            (dataframe["volume"] > dataframe["vol_ma20"] * thresholds["vol_mult_min"])
+            | (dataframe["volume_z"] > thresholds["vol_z_min"])
+        )
+
         entry_checks: Dict[str, Any] = {}
         if self._is_aggressive():
             strict_aggr = self._aggr_entry_is_strict()
-            adx_or_spread_ok = (
-                (dataframe["adx"] >= thresholds["adx_min"])
-                if strict_aggr
-                else ((dataframe["adx"] >= thresholds["adx_min"]) | (dataframe["ema_spread_pct"] > 0))
+            trend_ok = (
+                ((dataframe[trend_col] == 1) & (dataframe["ema20"] >= dataframe["ema50"] * 0.998))
+                | (dataframe["close"] > dataframe["ema200"] * (1.005 if strict_aggr else 0.995))
             )
-            if strict_aggr:
-                # Stricter trend gate: require informative trend alignment and a real margin above EMA200.
-                trend_ok = (
-                    (dataframe[trend_col] == 1)
-                    & (dataframe["close"] > dataframe["ema200"] * 1.005)
-                    & (dataframe["ema50"] > dataframe["ema200"])
-                )
-            else:
-                # Normal aggressive mode keeps a fallback path, but much tighter than the previous 0.98x EMA200.
-                trend_ok = (
-                    ((dataframe[trend_col] == 1) & (dataframe["close"] > dataframe["ema200"] * 0.995))
-                    | (dataframe["close"] > dataframe["ema200"] * 1.01)
-                )
+            trigger_ok = (
+                touched_pullback_zone
+                & rebound_confirmed
+                & (dataframe["close"] <= dataframe["ema20"] * thresholds["ema20_overext"])
+                & (dataframe["close"] >= dataframe["ema50"] * thresholds["pullback_floor"])
+            )
             entry_checks = {
-                "close_gt_ema20": dataframe["close"] > dataframe["ema20"],
-                "ema20_vs_ema50": dataframe["ema20"] >= dataframe["ema50"] * 0.998,
-                "rsi_min": dataframe["rsi"] >= thresholds["rsi_min"],
-                "rsi_max": dataframe["rsi"] <= thresholds["rsi_max"],
-                "adx_or_spread": adx_or_spread_ok,
-                "atr_min": dataframe["atr_pct"] >= thresholds["atr_min"],
-                "atr_max": dataframe["atr_pct"] <= thresholds["atr_max"],
-                "ema_spread_min": dataframe["ema_spread_pct"] >= thresholds["ema_spread_min"],
-                "ema20_not_overext": dataframe["close"] <= dataframe["ema20"] * thresholds["ema20_overext"],
-                "pullback_floor": dataframe["close"] >= dataframe["ema50"] * thresholds["pullback_floor"],
-                "volume_mult": dataframe["volume"] > dataframe["vol_ma20"] * thresholds["vol_mult_min"],
-                "volume_z_min": dataframe["volume_z"] > thresholds["vol_z_min"],
                 "trend_ok": trend_ok,
+                "trigger_ok": trigger_ok,
+                "rsi_ok": rsi_ok,
+                "atr_ok": atr_ok,
+                "volume_ok": volume_ok,
             }
         else:
+            trend_ok = (
+                (dataframe["close"] > dataframe["ema200"])
+                & (dataframe["ema20"] > dataframe["ema50"])
+                & (dataframe["ema50"] > dataframe["ema200"])
+                & (dataframe[ema50_info_col] > dataframe[ema200_info_col] * informative_trend_ratio)
+                & (dataframe[trend_col] == 1)
+            )
+            trigger_ok = (
+                touched_pullback_zone
+                & rebound_confirmed
+                & (dataframe["close"] <= dataframe["ema20"] * thresholds["ema20_overext"])
+                & (dataframe["close"] >= dataframe["ema50"] * thresholds["pullback_floor"])
+            )
             entry_checks = {
-                "close_gt_ema200": dataframe["close"] > dataframe["ema200"],
-                "ema20_gt_ema50": dataframe["ema20"] > dataframe["ema50"],
-                "ema50_gt_ema200": dataframe["ema50"] > dataframe["ema200"],
-                "info_trend_ratio": dataframe[ema50_info_col] > dataframe[ema200_info_col] * informative_trend_ratio,
-                "info_trend_flag": dataframe[trend_col] == 1,
-                "rsi_min": dataframe["rsi"] >= thresholds["rsi_min"],
-                "rsi_max": dataframe["rsi"] <= thresholds["rsi_max"],
-                "adx_min": dataframe["adx"] >= thresholds["adx_min"],
-                "atr_min": dataframe["atr_pct"] >= thresholds["atr_min"],
-                "atr_max": dataframe["atr_pct"] <= thresholds["atr_max"],
-                "ema_spread_min": dataframe["ema_spread_pct"] >= thresholds["ema_spread_min"],
-                "ema20_not_overext": dataframe["close"] <= dataframe["ema20"] * thresholds["ema20_overext"],
-                "pullback_floor": dataframe["close"] >= dataframe["ema50"] * thresholds["pullback_floor"],
-                "volume_mult": dataframe["volume"] > dataframe["vol_ma20"] * thresholds["vol_mult_min"],
-                "volume_z_min": dataframe["volume_z"] > thresholds["vol_z_min"],
-                "touched_pullback_zone": touched_pullback_zone,
-                "rebound_confirmed": rebound_confirmed,
+                "trend_ok": trend_ok,
+                "trigger_ok": trigger_ok,
+                "rsi_ok": rsi_ok,
+                "atr_ok": atr_ok,
+                "volume_ok": volume_ok,
             }
 
         deterministic_entry = dataframe["close"] > 0

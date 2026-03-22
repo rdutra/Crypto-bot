@@ -98,7 +98,7 @@ Dry-run + LLM risk-pair rotation before startup:
 ./scripts/run-dry-watch.sh --mode aggressive --rotate-risk-pairs
 ```
 
-Current defaults already assume `LlmHybridStrategy`, `LLM_ROTATE_ALLOWED_RISK=low medium high`, and `LLM_ROTATE_ALLOWED_REGIMES=trend_pullback breakout mean_reversion`.
+Current defaults already assume `LlmHybridStrategy` and `LLM_ROTATE_PROFILE=balanced`.
 
 Live trading (only when `dry_run=false`):
 
@@ -118,6 +118,7 @@ Live trading (only when `dry_run=false`):
 - `--confirm LIVE`
 
 `./scripts/rotate-risk-pairs.sh`
+- `--profile focused|balanced|expansive`
 - `--top <n>`
 - `--min-confidence <0..1>`
 - `--data-source local|exchange|auto`
@@ -128,7 +129,7 @@ Live trading (only when `dry_run=false`):
 - `--restart`
 - `--mode conservative|aggressive`
 - `--sync-whitelist` / `--no-sync-whitelist`
-- Spike-scanner integration is env-driven: set `LLM_ROTATE_USE_SPIKE_BIAS=true` plus `LLM_ROTATE_SPIKE_*` vars in `.env`.
+- Spike-scanner integration is usually profile-driven now. Use `LLM_ROTATE_PROFILE=balanced` or `expansive`, then only override `LLM_ROTATE_USE_SPIKE_BIAS` / `LLM_ROTATE_RESERVE_SPIKE_SLOT` if needed.
 
 `./scripts/rotate-risk-pairs-loop.sh`
 - `--interval-minutes <n>`

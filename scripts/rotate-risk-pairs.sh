@@ -23,6 +23,7 @@ QUOTE_ASSET="${LLM_ROTATE_QUOTE:-USDT}"
 MAX_CANDIDATES="${LLM_ROTATE_MAX_CANDIDATES:-20}"
 MIN_QUOTE_VOLUME="${LLM_ROTATE_MIN_QUOTE_VOLUME:-20000000}"
 EXCLUDE_REGEX="${LLM_ROTATE_EXCLUDE_REGEX:-(UP|DOWN|BULL|BEAR|1000|[0-9][0-9][0-9]+L|[0-9][0-9][0-9]+S)}"
+ROTATE_PROFILE="${LLM_ROTATE_PROFILE:-}"
 WHITELIST_ONLY="${LLM_ROTATE_WHITELIST_ONLY:-false}"
 SYNC_WHITELIST="${LLM_ROTATE_SYNC_WHITELIST:-true}"
 LOG_PATH="${LLM_ROTATE_LOG_PATH:-${ROOT_DIR}/freqtrade/user_data/logs/llm-pair-rotation.log}"
@@ -86,6 +87,7 @@ Options:
   --max-candidates N        Max discovered candidates before ranking.
   --min-quote-volume VALUE  Min 24h quote volume for discovered pairs.
   --exclude-regex REGEX     Regex filter for symbols/base (leveraged token guard).
+  --profile VALUE           focused | balanced | expansive (default: balanced).
   --allowed-risk "LIST"     Space/comma list from: low medium high.
   --allowed-regimes "LIST"  Space/comma list from: trend_pullback breakout mean_reversion.
   --whitelist-only          Restrict ranking to existing pair_whitelist.
@@ -122,6 +124,78 @@ is_true() {
   case "$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]')" in
     1|true|yes|on) return 0 ;;
     *) return 1 ;;
+  esac
+}
+
+apply_rotation_profile_defaults() {
+  local profile="$1"
+  case "${profile}" in
+    focused)
+      MAX_CANDIDATES="${MAX_CANDIDATES:-14}"
+      MIN_QUOTE_VOLUME="${MIN_QUOTE_VOLUME:-35000000}"
+      USE_SPIKE_BIAS="${USE_SPIKE_BIAS:-false}"
+      SPIKE_TOP_N="${SPIKE_TOP_N:-4}"
+      SPIKE_MIN_SCORE="${SPIKE_MIN_SCORE:-0.75}"
+      USE_SMART_MONEY_BIAS="${USE_SMART_MONEY_BIAS:-true}"
+      SMART_MONEY_TOP_N="${SMART_MONEY_TOP_N:-4}"
+      SMART_MONEY_MIN_SCORE="${SMART_MONEY_MIN_SCORE:-0.65}"
+      SMART_MONEY_FORCE_SLOT="${SMART_MONEY_FORCE_SLOT:-true}"
+      SOURCE_DIVERSITY_ENABLED="${SOURCE_DIVERSITY_ENABLED:-true}"
+      MIN_BINANCE_SKILL_PAIRS="${MIN_BINANCE_SKILL_PAIRS:-2}"
+      MIN_ALGO_PAIRS="${MIN_ALGO_PAIRS:-2}"
+      MIN_SPIKE_PAIRS="${MIN_SPIKE_PAIRS:-1}"
+      RESERVE_SPIKE_SLOT="${RESERVE_SPIKE_SLOT:-false}"
+      RESERVE_SPIKE_MIN_CONFIDENCE="${RESERVE_SPIKE_MIN_CONFIDENCE:-0.85}"
+      USE_TOKEN_INFO_PREFILTER="${USE_TOKEN_INFO_PREFILTER:-true}"
+      USE_TOKEN_AUDIT_PREFILTER="${USE_TOKEN_AUDIT_PREFILTER:-true}"
+      MIN_ATR_PCT_AGGRESSIVE="${MIN_ATR_PCT_AGGRESSIVE:-0.50}"
+      MAX_EXCHANGE_FALLBACKS="${MAX_EXCHANGE_FALLBACKS:-8}"
+      EXCHANGE_TIMEOUT_MS="${EXCHANGE_TIMEOUT_MS:-7000}"
+      ;;
+    expansive)
+      MAX_CANDIDATES="${MAX_CANDIDATES:-26}"
+      MIN_QUOTE_VOLUME="${MIN_QUOTE_VOLUME:-15000000}"
+      USE_SPIKE_BIAS="${USE_SPIKE_BIAS:-true}"
+      SPIKE_TOP_N="${SPIKE_TOP_N:-8}"
+      SPIKE_MIN_SCORE="${SPIKE_MIN_SCORE:-0.62}"
+      USE_SMART_MONEY_BIAS="${USE_SMART_MONEY_BIAS:-true}"
+      SMART_MONEY_TOP_N="${SMART_MONEY_TOP_N:-8}"
+      SMART_MONEY_MIN_SCORE="${SMART_MONEY_MIN_SCORE:-0.55}"
+      SMART_MONEY_FORCE_SLOT="${SMART_MONEY_FORCE_SLOT:-true}"
+      SOURCE_DIVERSITY_ENABLED="${SOURCE_DIVERSITY_ENABLED:-true}"
+      MIN_BINANCE_SKILL_PAIRS="${MIN_BINANCE_SKILL_PAIRS:-2}"
+      MIN_ALGO_PAIRS="${MIN_ALGO_PAIRS:-2}"
+      MIN_SPIKE_PAIRS="${MIN_SPIKE_PAIRS:-1}"
+      RESERVE_SPIKE_SLOT="${RESERVE_SPIKE_SLOT:-true}"
+      RESERVE_SPIKE_MIN_CONFIDENCE="${RESERVE_SPIKE_MIN_CONFIDENCE:-0.75}"
+      USE_TOKEN_INFO_PREFILTER="${USE_TOKEN_INFO_PREFILTER:-true}"
+      USE_TOKEN_AUDIT_PREFILTER="${USE_TOKEN_AUDIT_PREFILTER:-true}"
+      MIN_ATR_PCT_AGGRESSIVE="${MIN_ATR_PCT_AGGRESSIVE:-0.30}"
+      MAX_EXCHANGE_FALLBACKS="${MAX_EXCHANGE_FALLBACKS:-14}"
+      EXCHANGE_TIMEOUT_MS="${EXCHANGE_TIMEOUT_MS:-9000}"
+      ;;
+    *)
+      MAX_CANDIDATES="${MAX_CANDIDATES:-18}"
+      MIN_QUOTE_VOLUME="${MIN_QUOTE_VOLUME:-20000000}"
+      USE_SPIKE_BIAS="${USE_SPIKE_BIAS:-true}"
+      SPIKE_TOP_N="${SPIKE_TOP_N:-6}"
+      SPIKE_MIN_SCORE="${SPIKE_MIN_SCORE:-0.68}"
+      USE_SMART_MONEY_BIAS="${USE_SMART_MONEY_BIAS:-true}"
+      SMART_MONEY_TOP_N="${SMART_MONEY_TOP_N:-6}"
+      SMART_MONEY_MIN_SCORE="${SMART_MONEY_MIN_SCORE:-0.60}"
+      SMART_MONEY_FORCE_SLOT="${SMART_MONEY_FORCE_SLOT:-true}"
+      SOURCE_DIVERSITY_ENABLED="${SOURCE_DIVERSITY_ENABLED:-true}"
+      MIN_BINANCE_SKILL_PAIRS="${MIN_BINANCE_SKILL_PAIRS:-2}"
+      MIN_ALGO_PAIRS="${MIN_ALGO_PAIRS:-2}"
+      MIN_SPIKE_PAIRS="${MIN_SPIKE_PAIRS:-1}"
+      RESERVE_SPIKE_SLOT="${RESERVE_SPIKE_SLOT:-true}"
+      RESERVE_SPIKE_MIN_CONFIDENCE="${RESERVE_SPIKE_MIN_CONFIDENCE:-0.80}"
+      USE_TOKEN_INFO_PREFILTER="${USE_TOKEN_INFO_PREFILTER:-true}"
+      USE_TOKEN_AUDIT_PREFILTER="${USE_TOKEN_AUDIT_PREFILTER:-true}"
+      MIN_ATR_PCT_AGGRESSIVE="${MIN_ATR_PCT_AGGRESSIVE:-0.40}"
+      MAX_EXCHANGE_FALLBACKS="${MAX_EXCHANGE_FALLBACKS:-10}"
+      EXCHANGE_TIMEOUT_MS="${EXCHANGE_TIMEOUT_MS:-8000}"
+      ;;
   esac
 }
 
@@ -258,6 +332,10 @@ while [[ $# -gt 0 ]]; do
       EXCLUDE_REGEX="${2:-}"
       shift 2
       ;;
+    --profile)
+      ROTATE_PROFILE="${2:-}"
+      shift 2
+      ;;
     --allowed-risk)
       ALLOWED_RISK="${2:-}"
       shift 2
@@ -385,6 +463,15 @@ if [[ -z "${current_spike_pairs}" ]]; then
   current_spike_pairs="$(get_env_file_value SPIKE_PAIRS || true)"
 fi
 
+if [[ -z "${ROTATE_PROFILE}" ]]; then
+  ROTATE_PROFILE="$(get_env_file_value LLM_ROTATE_PROFILE || true)"
+fi
+ROTATE_PROFILE="$(printf '%s' "${ROTATE_PROFILE:-balanced}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${ROTATE_PROFILE}" != "focused" && "${ROTATE_PROFILE}" != "balanced" && "${ROTATE_PROFILE}" != "expansive" ]]; then
+  echo "--profile must be one of: focused, balanced, expansive." >&2
+  exit 1
+fi
+
 if [[ -z "${CANDIDATES}" ]]; then
   CANDIDATES="$(get_env_file_value LLM_ROTATE_CANDIDATES || true)"
 fi
@@ -497,14 +584,17 @@ fi
 if [[ -z "${ROTATION_OUTCOME_SUCCESS_PCT}" ]]; then
   ROTATION_OUTCOME_SUCCESS_PCT="$(get_env_file_value LLM_ROTATE_OUTCOME_SUCCESS_PCT || true)"
 fi
+
+apply_rotation_profile_defaults "${ROTATE_PROFILE}"
+
 USE_SPIKE_BIAS="${USE_SPIKE_BIAS:-false}"
 SPIKE_DB_TARGET="${SPIKE_DB_TARGET:-${ROOT_DIR}/freqtrade/user_data/logs/spike-scanner.sqlite}"
 SPIKE_LOOKBACK_HOURS="${SPIKE_LOOKBACK_HOURS:-48}"
-SPIKE_TOP_N="${SPIKE_TOP_N:-4}"
-SPIKE_MIN_SCORE="${SPIKE_MIN_SCORE:-0.80}"
+SPIKE_TOP_N="${SPIKE_TOP_N:-6}"
+SPIKE_MIN_SCORE="${SPIKE_MIN_SCORE:-0.68}"
 SPIKE_REQUIRE_LLM_ALLOWED="${SPIKE_REQUIRE_LLM_ALLOWED:-false}"
 USE_SMART_MONEY_BIAS="${USE_SMART_MONEY_BIAS:-false}"
-SMART_MONEY_TOP_N="${SMART_MONEY_TOP_N:-4}"
+SMART_MONEY_TOP_N="${SMART_MONEY_TOP_N:-6}"
 SMART_MONEY_MIN_SCORE="${SMART_MONEY_MIN_SCORE:-0.60}"
 SMART_MONEY_REQUIRE_BUY="${SMART_MONEY_REQUIRE_BUY:-true}"
 SMART_MONEY_FORCE_REFRESH="${SMART_MONEY_FORCE_REFRESH:-false}"
@@ -527,7 +617,7 @@ TOKEN_AUDIT_FAIL_OPEN="${TOKEN_AUDIT_FAIL_OPEN:-true}"
 EXCLUDED_BASES="${EXCLUDED_BASES:-USDC USDT FDUSD TUSD USDP BUSD DAI EUR USD1}"
 EXCLUDED_PAIRS="${EXCLUDED_PAIRS:-}"
 MIN_ATR_PCT="${MIN_ATR_PCT:-0}"
-MIN_ATR_PCT_AGGRESSIVE="${MIN_ATR_PCT_AGGRESSIVE:-0.35}"
+MIN_ATR_PCT_AGGRESSIVE="${MIN_ATR_PCT_AGGRESSIVE:-0.40}"
 ROTATION_OUTCOME_DB_PATH="${ROTATION_OUTCOME_DB_PATH:-${ROOT_DIR}/freqtrade/user_data/logs/rotation-outcomes.sqlite}"
 ROTATION_OUTCOME_HORIZON_MINUTES="${ROTATION_OUTCOME_HORIZON_MINUTES:-60}"
 ROTATION_OUTCOME_SUCCESS_PCT="${ROTATION_OUTCOME_SUCCESS_PCT:-1.0}"

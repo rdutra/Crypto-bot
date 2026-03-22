@@ -336,72 +336,37 @@ Core strategy:
 - `CORE_PAIRS=...`
 - `RISK_PAIRS=...`
 - Keep `exchange.pair_whitelist` lean (usually `CORE_PAIRS + RISK_PAIRS`) to avoid slow analysis cycles and missed signals.
-- `STRATEGY_MINIMAL_ROI_JSON={"0":0.05,"180":0.025,"720":0.0}` (optional override)
-- `STRATEGY_STOPLOSS=-0.08` (optional override)
-- `STRATEGY_TRAILING_STOP=true|false` (optional override; keep `false` when using `custom_stoploss`)
-- `STRATEGY_TRAILING_POSITIVE=0.015` (optional override)
-- `STRATEGY_TRAILING_OFFSET=0.04` (optional override)
-- `EXIT_USE_RSI_TAKE=false` (default off; enables RSI-based take-profit exits)
-- `STALE_TRADE_HOURS=24` and `STALE_MIN_PROFIT=0.01` (close stale low-progress trades)
-- `STALE_LOSS_HOURS=12` and `STALE_LOSS_PCT=-0.02` (faster stale loser cut)
-- `STALE_MAX_HOURS=72` (hard max holding age unless trade is strong)
-- `CUSTOM_SL_ATR_MULT=1.6`, `CUSTOM_SL_MIN=-0.08`, `CUSTOM_SL_MAX=-0.015` (dynamic custom stoploss)
-- `AGGR_ENTRY_STRICTNESS=strict|normal` (aggressive entry gate profile; default `strict`)
-- `BENCHMARK_PAIR=BTC/USDT` (benchmark market used for regime filter)
-- `BENCHMARK_FILTER_FOR_RISK=true` and `BENCHMARK_ALLOW_NEUTRAL_FOR_RISK=false` (gate alt/risk entries by BTC regime)
-- `BENCHMARK_CHAOS_ADX=16` and `BENCHMARK_MIN_SPREAD_PCT=-0.05` (BTC chaos definition)
-- `BENCHMARK_REDUCE_STAKE_WHEN_WEAK=true` with `BENCHMARK_RISK_STAKE_MULT_WHEN_WEAK=0.6` and `BENCHMARK_CORE_STAKE_MULT_WHEN_WEAK=0.85`
-- `ENTRY_RANKING_ENABLED=true`, `ENTRY_TOP_N=1`, `ENTRY_MIN_SCORE=0.58` (take only best candidates)
-- `ENTRY_RANKING_LOG=true|false` (defaults to on in live/dry-run, off in backtests)
+- `STRATEGY_MODE=conservative|aggressive`
+- `AGGR_ENTRY_STRICTNESS=strict|normal` (only matters in aggressive mode)
+- `BENCHMARK_PAIR=BTC/USDT` and `BENCHMARK_FILTER_FOR_RISK=true|false`
+- `ENTRY_RANKING_ENABLED=true|false`, `ENTRY_TOP_N=1`, `ENTRY_MIN_SCORE=0.58`
+- `RISK_STAKE_MULTIPLIER=...` and `RISK_MAX_OPEN_TRADES=...`
+- `IGNORE_BUYING_EXPIRED_CANDLE_AFTER=1200` for 15m aggressive mode
 - `RUNTIME_POLICY_ENABLED=true|false` (read runtime policy JSON and adapt risk knobs on the fly)
 - `RUNTIME_POLICY_PATH=/freqtrade/user_data/logs/llm-runtime-policy.json`
 - `RUNTIME_POLICY_REFRESH_SECONDS=30`
+- Strategy micro-thresholds now live in Python profiles instead of dozens of env vars. If you need to change the detailed gates, edit the strategy classes directly instead of pushing more top-level env.
 
 LLM rotation:
 
+- `LLM_ROTATE_PROFILE=focused|balanced|expansive`
 - `LLM_ROTATE_AUTO_DISCOVER=true`
 - `LLM_ROTATE_DATA_SOURCE=auto` (`local|exchange|auto`)
 - `LLM_ROTATE_EXCHANGE=binance`
 - `LLM_ROTATE_QUOTE=USDT`
-- `LLM_ROTATE_MAX_CANDIDATES=20`
-  - On CPU-only inference, `10-12` is usually more stable/faster than `20`.
-- `LLM_ROTATE_MIN_QUOTE_VOLUME=20000000`
-- `LLM_ROTATE_EXCLUDE_REGEX=(UP|DOWN|BULL|BEAR|1000|[0-9][0-9][0-9]+L|[0-9][0-9][0-9]+S)`
 - `LLM_ROTATE_TOP_N=6`
 - `LLM_ROTATE_MIN_CONFIDENCE=0.60`
 - `LLM_ROTATE_ALLOWED_RISK=low medium high`
 - `LLM_ROTATE_ALLOWED_REGIMES=trend_pullback breakout mean_reversion`
-- `LLM_ROTATE_MAX_EXCHANGE_FALLBACKS=10`
-- `LLM_ROTATE_EXCHANGE_TIMEOUT_MS=8000`
-- `LLM_ROTATE_SYNC_WHITELIST=true`
-- `LLM_ROTATE_SOURCE_DIVERSITY_ENABLED=true` (reserve part of the final basket for Binance-skill, algo, and spike sources)
-- `LLM_ROTATE_MIN_BINANCE_SKILL_PAIRS=2`
-- `LLM_ROTATE_MIN_ALGO_PAIRS=2`
-- `LLM_ROTATE_MIN_SPIKE_PAIRS=1`
-- `LLM_ROTATE_RESERVE_SPIKE_SLOT=false`
-- `LLM_ROTATE_RESERVE_SPIKE_MIN_CONFIDENCE=0.80`
 - `LLM_ROTATE_USE_SPIKE_BIAS=true|false` (prepend recent high-score scanner symbols into rotation candidates)
+- `LLM_ROTATE_USE_SMART_MONEY_BIAS=true|false`
+- `LLM_ROTATE_RESERVE_SPIKE_SLOT=true|false`
 - `LLM_ROTATE_SPIKE_DB_URL=postgresql+psycopg2://stack:stack@stack-postgres:5432/spike_scanner` (preferred)
-- `LLM_ROTATE_SPIKE_DB_PATH=./freqtrade/user_data/logs/spike-scanner.sqlite` (SQLite fallback / migration source)
-- `LLM_ROTATE_SPIKE_LOOKBACK_HOURS=48`
-- `LLM_ROTATE_SPIKE_TOP_N=6`
-- `LLM_ROTATE_SPIKE_MIN_SCORE=0.68`
-- `LLM_ROTATE_SPIKE_REQUIRE_LLM_ALLOWED=false` (if true, only scanner rows where LLM allowed are used)
-- `LLM_ROTATE_USE_SMART_MONEY_BIAS=true|false` (prepend Binance smart-money candidates that are spot-tradable now)
-- `LLM_ROTATE_SMART_MONEY_TOP_N=6`
-- `LLM_ROTATE_SMART_MONEY_MIN_SCORE=0.60`
-- `LLM_ROTATE_SMART_MONEY_REQUIRE_BUY=true` (if true, only smart-money `buy` side candidates are used)
-- `LLM_ROTATE_SMART_MONEY_FORCE_REFRESH=false` (if true, bypass bot-api trading-signal cache on each rotation)
-- `LLM_ROTATE_SMART_MONEY_FORCE_SLOT=true` (if true, reserve at least one selected slot for the top smart-money candidate)
 - `LLM_ROTATE_EXCLUDED_BASES=USDC USDT FDUSD TUSD USDP BUSD DAI EUR USD1` (drop obvious low-opportunity bases from the risk basket)
-- `LLM_ROTATE_MIN_ATR_PCT=0` and `LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE=0.35` (reject low-ATR names before ranking; this keeps pairs like `USDC/USDT` out of aggressive rotation)
-- `LLM_ROTATE_LOG_PATH=./freqtrade/user_data/logs/llm-pair-rotation.log`
 - `LLM_ROTATE_OUTCOME_DB_URL=postgresql+psycopg2://stack:stack@stack-postgres:5432/stack_analytics` (preferred)
-- `LLM_ROTATE_OUTCOME_DB_PATH=./freqtrade/user_data/logs/rotation-outcomes.sqlite` (SQLite fallback / migration source)
-- `LLM_ROTATE_OUTCOME_HORIZON_MINUTES=60`
-- `LLM_ROTATE_OUTCOME_SUCCESS_PCT=1.0` (used to classify selected/rejected rotation decisions into true/false positive/negative after the horizon passes)
 - `LLM_ROTATE_LOOP_INTERVAL_MINUTES=60` (used by `rotate-risk-pairs-loop.sh`)
 - `LLM_ROTATE_LOOP_JITTER_SECONDS=0` (optional random delay before each cycle)
+- Advanced rotator thresholds still exist as script-level overrides, but the intended path is to use a named `LLM_ROTATE_PROFILE` and only override high-level behavior when there is evidence you need it.
 
 Postgres admin:
 
@@ -439,15 +404,12 @@ Spike scanner:
 - `SPIKE_QUOTE_ASSET=USDT` (optional override; defaults to `LLM_ROTATE_QUOTE`)
 - `SPIKE_MIN_QUOTE_VOLUME=20000000` (optional override; defaults to `LLM_ROTATE_MIN_QUOTE_VOLUME`)
 - `SPIKE_EXCLUDE_REGEX=...` (optional override; defaults to `LLM_ROTATE_EXCLUDE_REGEX`)
+- `SPIKE_PROFILE=conservative|balanced|aggressive`
 - `SPIKE_INCLUDE_SYMBOLS=...` (optional explicit include list)
 - `SPIKE_EXCLUDE_SYMBOLS=BTCUSDT ETHUSDT`
 - `SPIKE_UNIVERSE_MAX_SYMBOLS=60`
 - `SPIKE_TOP_N_ALERTS=5`
 - `SPIKE_MIN_SCORE=0.76`
-- `SPIKE_MAX_SPREAD_PCT=0.20`
-- `SPIKE_MIN_BREAKOUT_PCT=0.003` (requires fresh breakout confirmation)
-- `SPIKE_MIN_BUY_RATIO=0.60` (requires buy-pressure confirmation)
-- `SPIKE_MIN_REL_QUOTE=8.0` (requires minimum quote-flow expansion vs baseline)
 - `SPIKE_ALERT_COOLDOWN_MINUTES=30`
 - `SPIKE_LOOP_SECONDS=5`
 - `SPIKE_LOG_PATH=/data/spike-alerts.jsonl`
@@ -459,12 +421,6 @@ Spike scanner:
 - `SPIKE_LLM_SHADOW_ENABLED=false`
 - `SPIKE_LLM_SHADOW_BOT_API_URL=http://bot-api:8000`
 - `SPIKE_LLM_SHADOW_TIMEOUT_SECONDS=45` (only raise this if local inference is still timing out)
-- `SPIKE_LLM_SHADOW_MIN_CONFIDENCE=0.65`
-- `SPIKE_LLM_SHADOW_ALLOWED_REGIMES=trend_pullback,breakout,mean_reversion`
-- `SPIKE_LLM_SHADOW_ALLOWED_RISK_LEVELS=low,medium`
-- `SPIKE_LLM_SHADOW_EVAL_TOP_N=5` (evaluate top N scored symbols per cycle)
-- `SPIKE_LLM_SHADOW_EVAL_MIN_SCORE=0.70` (minimum deterministic score to evaluate)
-- `SPIKE_LLM_SHADOW_EVAL_CACHE_SECONDS=300` (reuse per-symbol LLM result to limit API load)
 - `SPIKE_WEB_ENABLED=true`
 - `SPIKE_WEB_HOST=0.0.0.0`
 - `SPIKE_WEB_PORT=8090` and `SPIKE_WEB_PUBLIC_PORT=8091`
@@ -478,6 +434,7 @@ Spike scanner:
 - `SPIKE_NOTIFY_TIMEOUT_SECONDS=10`
 - `SPIKE_TELEGRAM_BOT_TOKEN=...` and `SPIKE_TELEGRAM_CHAT_ID=...` (or generic `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`)
 - `SPIKE_DISCORD_WEBHOOK_URL=...` (or generic `DISCORD_WEBHOOK_URL`)
+- Scanner score-shaping and shadow-eval thresholds are now owned by `SPIKE_PROFILE`. Override the individual `SPIKE_*` threshold vars only if you have evidence the profile is wrong for your tape.
 
 ## 9) Safety
 

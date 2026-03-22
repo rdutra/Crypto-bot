@@ -193,7 +193,8 @@ async def main() -> None:
         raise RuntimeError("No symbols selected for scanner universe. Adjust SPIKE_* filters.")
 
     LOGGER.info(
-        "Scanner universe loaded: symbols=%s quote=%s min_quote_volume=%.0f",
+        "Scanner universe loaded: profile=%s symbols=%s quote=%s min_quote_volume=%.0f",
+        settings.spike_profile,
         len(symbols),
         settings.quote_asset,
         settings.min_quote_volume,

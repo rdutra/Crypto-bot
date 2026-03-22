@@ -160,30 +160,35 @@ class LlmRotationAlignedStrategy(LlmTrendPullbackStrategy):
             | (dataframe["close"] > dataframe["open"])
             | (dataframe["rsi"] > dataframe["rsi"].shift(1))
         )
-        adx_or_spread_ok = (
-            (dataframe["adx"] >= thresholds["adx_min"])
-            | (dataframe["ema_spread_pct"] >= thresholds["ema_spread_min"])
-        )
         trend_ok = (
             ((dataframe[trend_col] == 1) & (dataframe["close"] > dataframe["ema200"] * 0.985))
             | (dataframe["close"] >= dataframe["ema50"] * thresholds["ema50_proximity"])
             | (dataframe["ema20"] >= dataframe["ema50"] * 0.995)
         )
+        trigger_ok = (
+            touched_reversion_zone
+            & reversal_hint
+            & (dataframe["close"] <= dataframe["ema20"] * thresholds["ema20_overext"])
+            & (dataframe["close"] >= dataframe["ema50"] * thresholds["pullback_floor"])
+        )
+        momentum_ok = (
+            (dataframe["adx"] >= thresholds["adx_min"])
+            | (dataframe["ema_spread_pct"] >= thresholds["ema_spread_min"])
+        )
+        rsi_ok = (dataframe["rsi"] >= thresholds["rsi_min"]) & (dataframe["rsi"] <= thresholds["rsi_max"])
+        atr_ok = (dataframe["atr_pct"] >= thresholds["atr_min"]) & (dataframe["atr_pct"] <= thresholds["atr_max"])
+        volume_ok = (
+            (dataframe["volume"] > dataframe["vol_ma20"] * thresholds["vol_mult_min"])
+            | (dataframe["volume_z"] > thresholds["vol_z_min"])
+        )
 
         entry_checks: Dict[str, Any] = {
-            "close_near_ema50": dataframe["close"] >= dataframe["ema50"] * thresholds["ema50_proximity"],
-            "rsi_min": dataframe["rsi"] >= thresholds["rsi_min"],
-            "rsi_max": dataframe["rsi"] <= thresholds["rsi_max"],
-            "adx_or_spread": adx_or_spread_ok,
-            "atr_min": dataframe["atr_pct"] >= thresholds["atr_min"],
-            "atr_max": dataframe["atr_pct"] <= thresholds["atr_max"],
-            "ema20_not_overext": dataframe["close"] <= dataframe["ema20"] * thresholds["ema20_overext"],
-            "pullback_floor": dataframe["close"] >= dataframe["ema50"] * thresholds["pullback_floor"],
-            "volume_mult": dataframe["volume"] > dataframe["vol_ma20"] * thresholds["vol_mult_min"],
-            "volume_z_min": dataframe["volume_z"] > thresholds["vol_z_min"],
-            "touched_reversion_zone": touched_reversion_zone,
-            "reversal_hint": reversal_hint,
             "trend_ok": trend_ok,
+            "trigger_ok": trigger_ok,
+            "momentum_ok": momentum_ok,
+            "rsi_ok": rsi_ok,
+            "atr_ok": atr_ok,
+            "volume_ok": volume_ok,
         }
 
         deterministic_entry = dataframe["close"] > 0

@@ -4,6 +4,49 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+VALID_SPIKE_PROFILES = {"conservative", "balanced", "aggressive"}
+SPIKE_PROFILE_DEFAULTS = {
+    "conservative": {
+        "min_score": 0.80,
+        "max_spread_pct": 0.18,
+        "min_breakout_pct": 0.0035,
+        "min_buy_ratio": 0.62,
+        "min_rel_quote": 9.0,
+        "llm_shadow_min_confidence": 0.70,
+        "llm_shadow_allowed_regimes": "trend_pullback,breakout",
+        "llm_shadow_allowed_risk_levels": "low,medium",
+        "llm_shadow_eval_top_n": 4,
+        "llm_shadow_eval_min_score": 0.68,
+        "llm_shadow_eval_cache_seconds": 300,
+    },
+    "balanced": {
+        "min_score": 0.76,
+        "max_spread_pct": 0.20,
+        "min_breakout_pct": 0.003,
+        "min_buy_ratio": 0.60,
+        "min_rel_quote": 8.0,
+        "llm_shadow_min_confidence": 0.65,
+        "llm_shadow_allowed_regimes": "trend_pullback,breakout",
+        "llm_shadow_allowed_risk_levels": "low,medium",
+        "llm_shadow_eval_top_n": 5,
+        "llm_shadow_eval_min_score": 0.62,
+        "llm_shadow_eval_cache_seconds": 300,
+    },
+    "aggressive": {
+        "min_score": 0.70,
+        "max_spread_pct": 0.24,
+        "min_breakout_pct": 0.0025,
+        "min_buy_ratio": 0.56,
+        "min_rel_quote": 6.5,
+        "llm_shadow_min_confidence": 0.60,
+        "llm_shadow_allowed_regimes": "trend_pullback,breakout,mean_reversion",
+        "llm_shadow_allowed_risk_levels": "low,medium,high",
+        "llm_shadow_eval_top_n": 7,
+        "llm_shadow_eval_min_score": 0.58,
+        "llm_shadow_eval_cache_seconds": 180,
+    },
+}
+
 
 def _env_bool(key: str, default: bool) -> bool:
     value = os.getenv(key)
@@ -40,7 +83,15 @@ def _shared_bot_api_url() -> str:
     return _env_str("LLM_BOT_API_URL", _env_str("BOT_API_URL", "http://bot-api:8000"))
 
 
+def _spike_profile() -> str:
+    value = _env_str("SPIKE_PROFILE", "balanced").lower()
+    if value not in VALID_SPIKE_PROFILES:
+        return "balanced"
+    return value
+
+
 class Settings(BaseModel):
+    spike_profile: str = _spike_profile()
     rest_base: str = _env_str("BINANCE_REST_BASE", "https://api.binance.com")
     ws_base: str = _env_str("BINANCE_WS_BASE", "wss://stream.binance.com:9443/stream")
     quote_asset: str = _env_str("SPIKE_QUOTE_ASSET", _env_str("LLM_ROTATE_QUOTE", "USDT")).upper()
@@ -61,11 +112,19 @@ class Settings(BaseModel):
     ws_symbols_per_conn: int = _env_int("SPIKE_WS_SYMBOLS_PER_CONN", 25)
 
     top_n_alerts: int = _env_int("SPIKE_TOP_N_ALERTS", 5)
-    min_score: float = _env_float("SPIKE_MIN_SCORE", 0.80)
-    max_spread_pct: float = _env_float("SPIKE_MAX_SPREAD_PCT", 0.30)
-    min_breakout_pct: float = _env_float("SPIKE_MIN_BREAKOUT_PCT", 0.003)
-    min_buy_ratio: float = _env_float("SPIKE_MIN_BUY_RATIO", 0.60)
-    min_rel_quote: float = _env_float("SPIKE_MIN_REL_QUOTE", 8.0)
+    min_score: float = _env_float("SPIKE_MIN_SCORE", SPIKE_PROFILE_DEFAULTS[_spike_profile()]["min_score"])
+    max_spread_pct: float = _env_float(
+        "SPIKE_MAX_SPREAD_PCT", SPIKE_PROFILE_DEFAULTS[_spike_profile()]["max_spread_pct"]
+    )
+    min_breakout_pct: float = _env_float(
+        "SPIKE_MIN_BREAKOUT_PCT", SPIKE_PROFILE_DEFAULTS[_spike_profile()]["min_breakout_pct"]
+    )
+    min_buy_ratio: float = _env_float(
+        "SPIKE_MIN_BUY_RATIO", SPIKE_PROFILE_DEFAULTS[_spike_profile()]["min_buy_ratio"]
+    )
+    min_rel_quote: float = _env_float(
+        "SPIKE_MIN_REL_QUOTE", SPIKE_PROFILE_DEFAULTS[_spike_profile()]["min_rel_quote"]
+    )
     cooldown_minutes: int = _env_int("SPIKE_ALERT_COOLDOWN_MINUTES", 30)
     loop_seconds: int = _env_int("SPIKE_LOOP_SECONDS", 5)
     alert_log_path: str = _env_str("SPIKE_LOG_PATH", "/data/spike-alerts.jsonl")
@@ -76,12 +135,30 @@ class Settings(BaseModel):
     llm_shadow_enabled: bool = _env_bool("SPIKE_LLM_SHADOW_ENABLED", False)
     llm_shadow_bot_api_url: str = _env_str("SPIKE_LLM_SHADOW_BOT_API_URL", _shared_bot_api_url())
     llm_shadow_timeout_seconds: int = _env_int("SPIKE_LLM_SHADOW_TIMEOUT_SECONDS", 45)
-    llm_shadow_min_confidence: float = _env_float("SPIKE_LLM_SHADOW_MIN_CONFIDENCE", 0.65)
-    llm_shadow_allowed_regimes: str = _env_str("SPIKE_LLM_SHADOW_ALLOWED_REGIMES", "trend_pullback,breakout")
-    llm_shadow_allowed_risk_levels: str = _env_str("SPIKE_LLM_SHADOW_ALLOWED_RISK_LEVELS", "low,medium")
-    llm_shadow_eval_top_n: int = _env_int("SPIKE_LLM_SHADOW_EVAL_TOP_N", 5)
-    llm_shadow_eval_min_score: float = _env_float("SPIKE_LLM_SHADOW_EVAL_MIN_SCORE", 0.70)
-    llm_shadow_eval_cache_seconds: int = _env_int("SPIKE_LLM_SHADOW_EVAL_CACHE_SECONDS", 300)
+    llm_shadow_min_confidence: float = _env_float(
+        "SPIKE_LLM_SHADOW_MIN_CONFIDENCE",
+        SPIKE_PROFILE_DEFAULTS[_spike_profile()]["llm_shadow_min_confidence"],
+    )
+    llm_shadow_allowed_regimes: str = _env_str(
+        "SPIKE_LLM_SHADOW_ALLOWED_REGIMES",
+        SPIKE_PROFILE_DEFAULTS[_spike_profile()]["llm_shadow_allowed_regimes"],
+    )
+    llm_shadow_allowed_risk_levels: str = _env_str(
+        "SPIKE_LLM_SHADOW_ALLOWED_RISK_LEVELS",
+        SPIKE_PROFILE_DEFAULTS[_spike_profile()]["llm_shadow_allowed_risk_levels"],
+    )
+    llm_shadow_eval_top_n: int = _env_int(
+        "SPIKE_LLM_SHADOW_EVAL_TOP_N",
+        SPIKE_PROFILE_DEFAULTS[_spike_profile()]["llm_shadow_eval_top_n"],
+    )
+    llm_shadow_eval_min_score: float = _env_float(
+        "SPIKE_LLM_SHADOW_EVAL_MIN_SCORE",
+        SPIKE_PROFILE_DEFAULTS[_spike_profile()]["llm_shadow_eval_min_score"],
+    )
+    llm_shadow_eval_cache_seconds: int = _env_int(
+        "SPIKE_LLM_SHADOW_EVAL_CACHE_SECONDS",
+        SPIKE_PROFILE_DEFAULTS[_spike_profile()]["llm_shadow_eval_cache_seconds"],
+    )
 
     web_enabled: bool = _env_bool("SPIKE_WEB_ENABLED", True)
     web_host: str = _env_str("SPIKE_WEB_HOST", "0.0.0.0")
