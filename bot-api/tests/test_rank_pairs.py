@@ -160,6 +160,57 @@ class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(response.decisions), 1)
         self.assertAlmostEqual(response.decisions[0].final_score, 8.4, places=6)
 
+    async def test_rank_pairs_does_not_apply_buy_bonus_to_non_binance_skill_candidates(self) -> None:
+        req = bot_main.RankPairsRequest(candidates=[_sample_candidate()])
+
+        async def fake_run_llm(_: str) -> str:
+            return json.dumps(
+                {
+                    "decisions": [
+                        {
+                            "pair": "BTC/USDT",
+                            "regime": "trend_pullback",
+                            "risk_level": "low",
+                            "confidence": 0.8,
+                            "note": "ok",
+                        }
+                    ]
+                }
+            )
+
+        async def fake_market_rank_context(force_refresh: bool = False):  # noqa: ARG001
+            return {}, {"provider": "official_skill", "source": "official_skill", "errors": [], "upstream_errors": []}
+
+        async def fake_trading_signal_context(force_refresh: bool = False):  # noqa: ARG001
+            return {"BTC/USDT": {"side": "buy", "score": 1.0}}, {
+                "provider": "direct",
+                "source": "binance_web3:path",
+                "errors": [],
+                "upstream_errors": [],
+            }
+
+        original_run_llm = bot_main._run_llm
+        original_market_loader = bot_main._load_market_rank_context
+        original_signal_loader = bot_main._load_trading_signal_context
+        original_market_enabled = bot_main.MARKET_RANK_SKILL_ENABLED
+        original_signal_enabled = bot_main.TRADING_SIGNAL_SKILL_ENABLED
+
+        try:
+            bot_main._run_llm = fake_run_llm
+            bot_main._load_market_rank_context = fake_market_rank_context
+            bot_main._load_trading_signal_context = fake_trading_signal_context
+            bot_main.MARKET_RANK_SKILL_ENABLED = True
+            bot_main.TRADING_SIGNAL_SKILL_ENABLED = True
+            response = await bot_main.rank_pairs(req)
+        finally:
+            bot_main._run_llm = original_run_llm
+            bot_main._load_market_rank_context = original_market_loader
+            bot_main._load_trading_signal_context = original_signal_loader
+            bot_main.MARKET_RANK_SKILL_ENABLED = original_market_enabled
+            bot_main.TRADING_SIGNAL_SKILL_ENABLED = original_signal_enabled
+
+        self.assertAlmostEqual(response.decisions[0].final_score, 8.4, places=6)
+
     async def test_query_token_info_returns_normalized_response(self) -> None:
         async def fake_loader(**kwargs):
             self.assertEqual(kwargs["symbol"], "CAKE")
@@ -359,6 +410,77 @@ class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
         by_pair = {decision.pair: decision for decision in response.decisions}
         self.assertLess(by_pair["CAKE/USDT"].final_score, by_pair["WLD/USDT"].final_score)
+
+    async def test_rank_pairs_requires_higher_confidence_for_high_risk_mean_reversion(self) -> None:
+        req = bot_main.RankPairsRequest(
+            candidates=[
+                bot_main.PairCandidate(
+                    pair="CAKE/USDT",
+                    timeframe="1h",
+                    price=2.0,
+                    ema_20=1.98,
+                    ema_50=1.95,
+                    ema_200=1.8,
+                    rsi_14=58.0,
+                    adx_14=18.0,
+                    atr_pct=2.1,
+                    volume_zscore=0.8,
+                    trend_4h="mixed",
+                    market_structure="mixed",
+                    deterministic_score=9.0,
+                ),
+                bot_main.PairCandidate(
+                    pair="WLD/USDT",
+                    timeframe="1h",
+                    price=1.0,
+                    ema_20=0.98,
+                    ema_50=0.97,
+                    ema_200=0.9,
+                    rsi_14=60.0,
+                    adx_14=20.0,
+                    atr_pct=3.2,
+                    volume_zscore=1.1,
+                    trend_4h="mixed",
+                    market_structure="mixed",
+                    deterministic_score=8.0,
+                    candidate_sources=["spike"],
+                ),
+            ],
+            allowed_risk_levels=["low", "medium", "high"],
+            allowed_regimes=["trend_pullback", "breakout", "mean_reversion"],
+            min_confidence=0.60,
+        )
+
+        async def fake_run_llm(_: str) -> str:
+            return json.dumps(
+                {
+                    "decisions": [
+                        {
+                            "pair": "CAKE/USDT",
+                            "regime": "mean_reversion",
+                            "risk_level": "high",
+                            "confidence": 0.84,
+                            "note": "reversion",
+                        },
+                        {
+                            "pair": "WLD/USDT",
+                            "regime": "mean_reversion",
+                            "risk_level": "high",
+                            "confidence": 0.84,
+                            "note": "spike reversion",
+                        },
+                    ]
+                }
+            )
+
+        original_run_llm = bot_main._run_llm
+        try:
+            bot_main._run_llm = fake_run_llm
+            response = await bot_main.rank_pairs(req)
+        finally:
+            bot_main._run_llm = original_run_llm
+
+        self.assertEqual(response.selected_pairs, ["WLD/USDT"])
 
 
 if __name__ == "__main__":

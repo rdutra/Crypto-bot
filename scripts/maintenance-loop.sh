@@ -4,11 +4,14 @@ set -eu
 LOG_DIR="/freqtrade/user_data/logs"
 STATE_DIR="${SCHED_STATE_DIR:-/freqtrade/user_data/logs/scheduler_state}"
 DATA_DIR="/freqtrade/user_data/data"
+SHELL_HELPER="/workspace/scripts/shell_helpers.py"
+CONFIG_PATH="/freqtrade/user_data/config.json"
+ROTATION_LOG_PATH="/freqtrade/user_data/logs/llm-pair-rotation.log"
 
 SCHED_DOWNLOAD_ENABLED="${SCHED_DOWNLOAD_ENABLED:-true}"
 SCHED_DOWNLOAD_TIME="${SCHED_DOWNLOAD_TIME:-02:15}"
 SCHED_DOWNLOAD_TIMERANGE="${SCHED_DOWNLOAD_TIMERANGE:-20230101-}"
-SCHED_DOWNLOAD_PAIRS="${SCHED_DOWNLOAD_PAIRS:-BTC/USDT ETH/USDT}"
+SCHED_DOWNLOAD_PAIRS="${SCHED_DOWNLOAD_PAIRS:-BTC/USDT ETH/USDT BNB/USDT SOL/USDT XRP/USDT AVAX/USDT LINK/USDT INJ/USDT DOGE/USDT ADA/USDT SUI/USDT TRX/USDT TAO/USDT ZEC/USDT WLD/USDT PEPE/USDT}"
 
 SCHED_PRUNE_ENABLED="${SCHED_PRUNE_ENABLED:-true}"
 SCHED_PRUNE_TIME="${SCHED_PRUNE_TIME:-03:00}"
@@ -33,12 +36,15 @@ is_true() {
 
 run_download() {
   log "[scheduler] Running download-data"
+  WHITELIST_PAIRS="$(python3 "${SHELL_HELPER}" current-whitelist-pairs "${CONFIG_PATH}")"
+  RECENT_ROTATION_PAIRS="$(python3 "${SHELL_HELPER}" recent-rotation-pairs "${ROTATION_LOG_PATH}" 8 20)"
+  ALL_PAIRS="$(python3 "${SHELL_HELPER}" unique-pairs "${SCHED_DOWNLOAD_PAIRS} ${WHITELIST_PAIRS} ${RECENT_ROTATION_PAIRS}")"
   # Intentional word splitting for pair list.
   # shellcheck disable=SC2086
   if freqtrade download-data \
     --config /freqtrade/user_data/config.json \
     --timeframes 1h 4h \
-    --pairs ${SCHED_DOWNLOAD_PAIRS} \
+    --pairs ${ALL_PAIRS} \
     --timerange "${SCHED_DOWNLOAD_TIMERANGE}" \
     >>"${DOWNLOAD_LOG}" 2>&1; then
     date +%F >"${STATE_DIR}/last_download_date"

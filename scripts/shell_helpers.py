@@ -7,6 +7,18 @@ import sys
 from pathlib import Path
 
 
+def _parse_pairs(raw: str) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for part in str(raw or "").replace(",", " ").split():
+        pair = part.strip().upper()
+        if not pair or pair in seen:
+            continue
+        seen.add(pair)
+        out.append(pair)
+    return out
+
+
 def read_env_value(env_path: Path, key: str) -> int:
     if not env_path.exists():
         return 0
@@ -57,6 +69,66 @@ def summarize_rotation_log(log_path: Path) -> int:
     return 0
 
 
+def current_whitelist_pairs(config_path: Path) -> int:
+    if not config_path.exists():
+        return 0
+    try:
+        payload = json.loads(config_path.read_text())
+    except Exception:
+        return 0
+    exchange = payload.get("exchange", {})
+    if not isinstance(exchange, dict):
+        return 0
+    print(" ".join(_parse_pairs(" ".join(str(item) for item in exchange.get("pair_whitelist", [])))))
+    return 0
+
+
+def recent_rotation_pairs(log_path: Path, max_entries: int, max_pairs: int) -> int:
+    if not log_path.exists():
+        return 0
+    try:
+        lines = [line for line in log_path.read_text().splitlines() if line.strip()]
+    except Exception:
+        return 0
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in reversed(lines[-max_entries:]):
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for pair in payload.get("selected_pairs", []):
+            normalized = str(pair).strip().upper()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                ordered.append(normalized)
+        for row in payload.get("decisions", []):
+            if not isinstance(row, dict):
+                continue
+            normalized = str(row.get("pair", "")).strip().upper()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                ordered.append(normalized)
+        for row in payload.get("skipped", []):
+            if not isinstance(row, dict):
+                continue
+            normalized = str(row.get("pair", "")).strip().upper()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                ordered.append(normalized)
+        if len(ordered) >= max_pairs:
+            break
+    print(" ".join(ordered[:max_pairs]))
+    return 0
+
+
+def unique_pairs(pairs: list[str]) -> int:
+    print(" ".join(_parse_pairs(" ".join(pairs))))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -72,6 +144,17 @@ def build_parser() -> argparse.ArgumentParser:
     summarize = subparsers.add_parser("summarize-rotation-log")
     summarize.add_argument("log_path", type=Path)
 
+    whitelist = subparsers.add_parser("current-whitelist-pairs")
+    whitelist.add_argument("config_path", type=Path)
+
+    recent_rotation = subparsers.add_parser("recent-rotation-pairs")
+    recent_rotation.add_argument("log_path", type=Path)
+    recent_rotation.add_argument("max_entries", type=int)
+    recent_rotation.add_argument("max_pairs", type=int)
+
+    unique = subparsers.add_parser("unique-pairs")
+    unique.add_argument("pairs", nargs="*")
+
     return parser
 
 
@@ -83,6 +166,12 @@ def main() -> int:
         return validate_config_mode(args.config_path, args.expected_mode)
     if args.command == "summarize-rotation-log":
         return summarize_rotation_log(args.log_path)
+    if args.command == "current-whitelist-pairs":
+        return current_whitelist_pairs(args.config_path)
+    if args.command == "recent-rotation-pairs":
+        return recent_rotation_pairs(args.log_path, args.max_entries, args.max_pairs)
+    if args.command == "unique-pairs":
+        return unique_pairs(args.pairs)
     raise AssertionError(f"Unhandled command: {args.command}")
 
 

@@ -95,10 +95,7 @@ class Settings(BaseModel):
     rest_base: str = _env_str("BINANCE_REST_BASE", "https://api.binance.com")
     ws_base: str = _env_str("BINANCE_WS_BASE", "wss://stream.binance.com:9443/stream")
     quote_asset: str = _env_str("SPIKE_QUOTE_ASSET", _env_str("LLM_ROTATE_QUOTE", "USDT")).upper()
-    min_quote_volume: float = _env_float(
-        "SPIKE_MIN_QUOTE_VOLUME",
-        _env_float("LLM_ROTATE_MIN_QUOTE_VOLUME", 20000000.0),
-    )
+    min_quote_volume: float = _env_float("SPIKE_MIN_QUOTE_VOLUME", 5000000.0)
     exclude_regex: str = _env_str(
         "SPIKE_EXCLUDE_REGEX",
         _env_str(
@@ -108,7 +105,7 @@ class Settings(BaseModel):
     )
     include_symbols: str = os.getenv("SPIKE_INCLUDE_SYMBOLS", "")
     exclude_symbols: str = _env_str("SPIKE_EXCLUDE_SYMBOLS", "BTCUSDT ETHUSDT")
-    universe_max_symbols: int = _env_int("SPIKE_UNIVERSE_MAX_SYMBOLS", 60)
+    universe_max_symbols: int = _env_int("SPIKE_UNIVERSE_MAX_SYMBOLS", 120)
     ws_symbols_per_conn: int = _env_int("SPIKE_WS_SYMBOLS_PER_CONN", 25)
 
     top_n_alerts: int = _env_int("SPIKE_TOP_N_ALERTS", 5)

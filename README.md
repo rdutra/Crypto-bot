@@ -327,7 +327,7 @@ Core strategy:
 - `LLM_TRADING_SIGNAL_TIMEOUT_SECONDS=6`, `LLM_TRADING_SIGNAL_CACHE_SECONDS=180`
 - `LLM_TRADING_SIGNAL_MAX_ITEMS=120`, `LLM_TRADING_SIGNAL_QUOTE=USDT`
 - `LLM_TRADING_SIGNAL_MIN_SCORE=0.25`
-- `LLM_TRADING_SIGNAL_BUY_BONUS_MULT=0.9` (bonus weight for `buy` signals in ranking)
+- `LLM_TRADING_SIGNAL_BUY_BONUS_MULT=0.35` (bonus weight for `buy` signals in ranking; only applied to Binance-skill sourced candidates)
 - `LLM_TRADING_SIGNAL_SELL_PENALTY_MULT=0.0` (default off for long-only; set `>0` to penalize `sell`)
 - `LLM_TRADING_SIGNAL_CHAIN_ID=56` and `LLM_TRADING_SIGNAL_USER_AGENT=binance-web3/1.0 (Skill)`
 - `LLM_TRADING_SIGNAL_ENDPOINTS=...` (comma-separated endpoint paths to probe)
@@ -390,7 +390,7 @@ Scheduler:
 - `SCHED_DOWNLOAD_ENABLED=true`
 - `SCHED_DOWNLOAD_TIME=02:15`
 - `SCHED_DOWNLOAD_TIMERANGE=20230101-`
-- `SCHED_DOWNLOAD_PAIRS=...`
+- `SCHED_DOWNLOAD_PAIRS=...` (seed list; scheduler also pulls current whitelist and recent rotation names automatically)
 - `SCHED_PRUNE_ENABLED=true`
 - `SCHED_PRUNE_TIME=03:00`
 - `SCHED_PRUNE_WEEKDAY=0`
@@ -402,12 +402,12 @@ Spike scanner:
 - `BINANCE_REST_BASE=https://api.binance.com`
 - `BINANCE_WS_BASE=wss://stream.binance.com:9443/stream`
 - `SPIKE_QUOTE_ASSET=USDT` (optional override; defaults to `LLM_ROTATE_QUOTE`)
-- `SPIKE_MIN_QUOTE_VOLUME=20000000` (optional override; defaults to `LLM_ROTATE_MIN_QUOTE_VOLUME`)
+- `SPIKE_MIN_QUOTE_VOLUME=5000000` (optional override; default is tuned lower so scanner sees more fast movers)
 - `SPIKE_EXCLUDE_REGEX=...` (optional override; defaults to `LLM_ROTATE_EXCLUDE_REGEX`)
 - `SPIKE_PROFILE=conservative|balanced|aggressive`
 - `SPIKE_INCLUDE_SYMBOLS=...` (optional explicit include list)
 - `SPIKE_EXCLUDE_SYMBOLS=BTCUSDT ETHUSDT`
-- `SPIKE_UNIVERSE_MAX_SYMBOLS=60`
+- `SPIKE_UNIVERSE_MAX_SYMBOLS=120`
 - `SPIKE_TOP_N_ALERTS=5`
 - `SPIKE_MIN_SCORE=0.76`
 - `SPIKE_ALERT_COOLDOWN_MINUTES=30`

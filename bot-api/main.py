@@ -64,7 +64,7 @@ TOKEN_AUDIT_SKILL_ENABLED = SKILL_SERVICE.settings.token_audit_enabled
 ADDRESS_INFO_SKILL_ENABLED = SKILL_SERVICE.settings.address_info_enabled
 MARKET_RANK_QUOTE = SKILL_SERVICE.settings.market_rank_quote
 TRADING_SIGNAL_QUOTE = SKILL_SERVICE.settings.trading_signal_quote
-TRADING_SIGNAL_BUY_BONUS_MULT = float(os.getenv("LLM_TRADING_SIGNAL_BUY_BONUS_MULT", "0.9"))
+TRADING_SIGNAL_BUY_BONUS_MULT = float(os.getenv("LLM_TRADING_SIGNAL_BUY_BONUS_MULT", "0.35"))
 TRADING_SIGNAL_SELL_PENALTY_MULT = float(os.getenv("LLM_TRADING_SIGNAL_SELL_PENALTY_MULT", "0.0"))
 FALLBACK_CONFIDENCE_SCALE = max(8.0, float(os.getenv("LLM_FALLBACK_CONFIDENCE_SCALE", "13.5") or "13.5"))
 FALLBACK_CONFIDENCE_CAP = min(0.95, max(0.2, float(os.getenv("LLM_FALLBACK_CONFIDENCE_CAP", "0.72") or "0.72")))
@@ -75,6 +75,8 @@ MEAN_REVERSION_HIGH_RISK_PENALTY = max(
     0.0, float(os.getenv("LLM_MEAN_REVERSION_HIGH_RISK_PENALTY", "0.6") or "0.6")
 )
 SPIKE_MEAN_REVERSION_PENALTY = max(0.0, float(os.getenv("LLM_SPIKE_MEAN_REVERSION_PENALTY", "0.25") or "0.25"))
+MEAN_REVERSION_HIGH_MIN_CONFIDENCE = 0.85
+SPIKE_MEAN_REVERSION_HIGH_MIN_CONFIDENCE = 0.80
 
 LLM_DEBUG_ENABLED = str(os.getenv("LLM_DEBUG_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
 LLM_DEBUG_MAX_ENTRIES = max(20, min(2000, int(os.getenv("LLM_DEBUG_MAX_ENTRIES", "250") or "250")))
@@ -296,7 +298,8 @@ def _rank_response(
 
         deterministic_score = by_pair[key].deterministic_score
         final_score = deterministic_score + (confidence * 3.0) + (market_rank_score * 0.75)
-        if trading_signal_side == "buy":
+        candidate_sources = {item.strip().lower() for item in by_pair[key].candidate_sources if item.strip()}
+        if trading_signal_side == "buy" and "binance_skill" in candidate_sources:
             final_score += trading_signal_score * TRADING_SIGNAL_BUY_BONUS_MULT
         elif trading_signal_side == "sell" and TRADING_SIGNAL_SELL_PENALTY_MULT > 0.0:
             final_score -= trading_signal_score * TRADING_SIGNAL_SELL_PENALTY_MULT
@@ -307,7 +310,6 @@ def _rank_response(
             final_score += 0.75
         if risk_level == "low":
             final_score += 0.25
-        candidate_sources = {item.strip().lower() for item in by_pair[key].candidate_sources if item.strip()}
         if regime == "mean_reversion":
             mean_reversion_penalty = SPIKE_MEAN_REVERSION_PENALTY if "spike" in candidate_sources else MEAN_REVERSION_PENALTY
             if risk_level == "high":
@@ -333,7 +335,16 @@ def _rank_response(
     for item in ranked:
         if len(selected) >= req.top_n:
             break
-        if item.regime in allowed_regimes and item.risk_level in allowed_risk and item.confidence >= req.min_confidence:
+        candidate_sources = {entry.strip().lower() for entry in by_pair[item.pair.upper()].candidate_sources if entry.strip()}
+        min_confidence = req.min_confidence
+        if item.regime == "mean_reversion" and item.risk_level == "high":
+            extra_floor = (
+                SPIKE_MEAN_REVERSION_HIGH_MIN_CONFIDENCE
+                if "spike" in candidate_sources
+                else MEAN_REVERSION_HIGH_MIN_CONFIDENCE
+            )
+            min_confidence = max(min_confidence, extra_floor)
+        if item.regime in allowed_regimes and item.risk_level in allowed_risk and item.confidence >= min_confidence:
             selected.append(item.pair)
 
     return RankPairsResponse(
