@@ -110,6 +110,7 @@ def build_rank_prompt(
     for candidate in req.candidates:
         rank_info = market_rank_context.get(candidate.pair.upper(), {})
         signal_info = trading_signal_context.get(candidate.pair.upper(), {})
+        coin_news = candidate.coin_news_context if isinstance(candidate.coin_news_context, dict) else {}
         compact_candidates.append(
             {
                 "pair": candidate.pair,
@@ -132,6 +133,14 @@ def build_rank_prompt(
                 "recent_avg_profit_pct": candidate.recent_avg_profit_pct,
                 "recent_net_profit_pct": candidate.recent_net_profit_pct,
                 "historical_penalty": candidate.historical_penalty,
+                "coin_news_context": {
+                    "news_count_24h": coin_news.get("news_count_24h", 0),
+                    "sentiment": coin_news.get("sentiment", "neutral"),
+                    "sentiment_score": coin_news.get("sentiment_score", 0.0),
+                    "major_catalyst": bool(coin_news.get("major_catalyst", False)),
+                    "risk_flags": coin_news.get("risk_flags", []),
+                    "last_news_age_minutes": coin_news.get("last_news_age_minutes"),
+                },
                 "market_rank_score": rank_info.get("rank_score", 0.0),
                 "market_rank_hits": rank_info.get("hits", 0),
                 "market_rank_trending": rank_info.get("trending_rank"),
@@ -143,6 +152,10 @@ def build_rank_prompt(
                 "trading_signal_note": signal_info.get("note", ""),
             }
         )
+
+    prompt_payload = {"candidates": compact_candidates}
+    if req.market_context is not None:
+        prompt_payload["market_context"] = req.market_context.model_dump()
 
     return (
         "You are a crypto pair-selection assistant.\n"
@@ -161,9 +174,16 @@ def build_rank_prompt(
         "- trading_signal_side/score is an extra prior from Binance trading-signal skill.\n"
         "- recent_* fields summarize recent realized performance for that pair.\n"
         "- Lower confidence or prefer no_trade when recent pair performance is persistently negative, unless the setup is an exceptional spike candidate.\n"
+        "- market_context describes the broad market impulse and session backdrop.\n"
+        "- If market_context shows a broad risk-on move with overextended majors, avoid late low-quality mean_reversion/high sympathy trades.\n"
+        "- In broad risk-on conditions, prefer liquid or technically cleaner pairs over weak copycat pumps.\n"
+        "- In broad risk-off conditions, be stricter on breakout and high-risk continuation setups.\n"
+        "- coin_news_context summarizes recent curated headlines for that pair.\n"
+        "- Penalize pairs with negative news sentiment or explicit risk flags like hack, exploit, fraud, or delisting.\n"
+        "- Positive catalyst headlines can support conviction, but do not override obviously weak technical structure.\n"
         "- If uncertain, use no_trade with high risk.\n"
         "- Keep note under 140 characters.\n"
-        f"Input JSON:\n{json.dumps({'candidates': compact_candidates}, separators=(',', ':'))}"
+        f"Input JSON:\n{json.dumps(prompt_payload, separators=(',', ':'))}"
     )
 
 

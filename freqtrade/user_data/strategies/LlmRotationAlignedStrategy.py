@@ -22,25 +22,28 @@ class LlmRotationAlignedStrategy(LlmTrendPullbackStrategy):
             strict = self._aggr_entry_is_strict()
             return {
                 "rsi_min": 28.0 if strict else 25.0,
-                "rsi_max": 74.0 if strict else 78.0,
-                "adx_min": 12.0 if strict else 10.0,
-                "atr_min": 0.2,
+                "rsi_max": 70.0 if strict else 72.0,
+                "adx_min": 14.0 if strict else 12.0,
+                "atr_min": 0.35 if strict else 0.30,
                 "atr_max": self._float_env("ROTATION_RISK_ATR_MAX", 8.0, 1.0, 12.0),
                 "ema_spread_min": self._float_env(
                     "ROTATION_RISK_EMA_SPREAD_MIN",
-                    -0.25 if strict else -0.45,
+                    -0.15 if strict else -0.30,
                     -2.0,
                     1.5,
                 ),
-                "ema50_proximity": 0.985 if strict else 0.975,
-                "ema20_overext": 1.08,
-                "pullback_floor": 0.93 if strict else 0.90,
-                "vol_mult_min": 0.25 if strict else 0.10,
-                "vol_z_min": -2.5,
-                "rebound_over_prev": 0.992 if strict else 0.985,
+                "ema50_proximity": 0.99 if strict else 0.982,
+                "ema20_overext": 1.05,
+                "pullback_floor": 0.95 if strict else 0.93,
+                "vol_mult_min": 0.40 if strict else 0.25,
+                "vol_z_min": -1.5 if strict else -1.0,
+                "rebound_over_prev": 0.996 if strict else 0.992,
             }
 
         return super()._entry_thresholds(pair)
+
+    def _rotation_aligned_stake_mult(self) -> float:
+        return 0.70
 
     def _exit_thresholds(self, pair: str) -> Dict[str, float]:
         if self._is_risk_pair(pair) and self._is_aggressive():
@@ -52,6 +55,45 @@ class LlmRotationAlignedStrategy(LlmTrendPullbackStrategy):
             }
 
         return super()._exit_thresholds(pair)
+
+    def custom_stake_amount(
+        self,
+        pair: str,
+        current_time: datetime,
+        current_rate: float,
+        proposed_stake: float,
+        min_stake: float | None,
+        max_stake: float,
+        leverage: float,
+        entry_tag: str | None,
+        side: str,
+        **kwargs,
+    ) -> float:
+        stake = super().custom_stake_amount(
+            pair=pair,
+            current_time=current_time,
+            current_rate=current_rate,
+            proposed_stake=proposed_stake,
+            min_stake=min_stake,
+            max_stake=max_stake,
+            leverage=leverage,
+            entry_tag=entry_tag,
+            side=side,
+            **kwargs,
+        )
+        is_spike_pair = False
+        if hasattr(self, "_is_spike_pair"):
+            try:
+                is_spike_pair = bool(getattr(self, "_is_spike_pair")(pair))
+            except Exception:
+                is_spike_pair = False
+        if self._is_aggressive() and self._is_risk_pair(pair) and not is_spike_pair:
+            stake *= self._rotation_aligned_stake_mult()
+        if min_stake is not None:
+            stake = max(stake, float(min_stake))
+        if max_stake is not None:
+            stake = min(stake, float(max_stake))
+        return stake
 
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:

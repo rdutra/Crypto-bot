@@ -186,20 +186,30 @@ async def main() -> None:
     notifier = AlertNotifier(settings)
     llm_shadow = LlmShadowDecider(settings)
 
+    symbols: list[str] = []
+    universe_error: str | None = None
     async with aiohttp.ClientSession() as session:
-        symbols = await load_universe(session, settings)
+        try:
+            symbols = await load_universe(session, settings)
+        except Exception as exc:
+            universe_error = f"{type(exc).__name__}: {exc}"
+            LOGGER.exception("Failed to load scanner universe. Dashboard/outcomes will stay available.")
 
     if not symbols:
-        raise RuntimeError("No symbols selected for scanner universe. Adjust SPIKE_* filters.")
+        if universe_error:
+            LOGGER.warning("Scanner universe unavailable: %s", universe_error)
+        else:
+            LOGGER.warning("No symbols selected for scanner universe. Adjust SPIKE_* filters.")
 
-    LOGGER.info(
-        "Scanner universe loaded: profile=%s symbols=%s quote=%s min_quote_volume=%.0f",
-        settings.spike_profile,
-        len(symbols),
-        settings.quote_asset,
-        settings.min_quote_volume,
-    )
-    LOGGER.info("Top symbols sample: %s", ", ".join(s.upper() for s in symbols[:10]))
+    if symbols:
+        LOGGER.info(
+            "Scanner universe loaded: profile=%s symbols=%s quote=%s min_quote_volume=%.0f",
+            settings.spike_profile,
+            len(symbols),
+            settings.quote_asset,
+            settings.min_quote_volume,
+        )
+        LOGGER.info("Top symbols sample: %s", ", ".join(s.upper() for s in symbols[:10]))
     LOGGER.info("Prediction DB: %s", settings.db_path)
     if store.orphan_outcomes_pruned > 0:
         LOGGER.info("Scanner DB cleanup: pruned orphan outcomes=%s", store.orphan_outcomes_pruned)
@@ -227,11 +237,14 @@ async def main() -> None:
             LOGGER.info("Notifications enabled but no targets configured. Set Telegram/Discord env vars.")
     await notifier.notify_startup(len(symbols))
 
-    tasks = [
-        stream_symbols(settings.ws_base, symbols, settings.ws_symbols_per_conn),
-        scorer_loop(settings, store, notifier, llm_shadow),
-        outcomes_loop(settings, store),
-    ]
+    tasks = [outcomes_loop(settings, store)]
+    if symbols:
+        tasks.extend(
+            [
+                stream_symbols(settings.ws_base, symbols, settings.ws_symbols_per_conn),
+                scorer_loop(settings, store, notifier, llm_shadow),
+            ]
+        )
     if settings.web_enabled:
         tasks.append(web_loop(settings, store))
 

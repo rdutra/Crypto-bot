@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException
 
 from api_models import (
     LlmRankDecision,
+    MarketContext,
     PairCandidate,
     RankPairsRequest,
     RankPairsResponse,
@@ -75,8 +76,8 @@ MEAN_REVERSION_HIGH_RISK_PENALTY = max(
     0.0, float(os.getenv("LLM_MEAN_REVERSION_HIGH_RISK_PENALTY", "0.6") or "0.6")
 )
 SPIKE_MEAN_REVERSION_PENALTY = max(0.0, float(os.getenv("LLM_SPIKE_MEAN_REVERSION_PENALTY", "0.25") or "0.25"))
-MEAN_REVERSION_HIGH_MIN_CONFIDENCE = 0.85
-SPIKE_MEAN_REVERSION_HIGH_MIN_CONFIDENCE = 0.80
+MEAN_REVERSION_HIGH_MIN_CONFIDENCE = 0.90
+SPIKE_MEAN_REVERSION_HIGH_MIN_CONFIDENCE = 0.88
 
 LLM_DEBUG_ENABLED = str(os.getenv("LLM_DEBUG_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
 LLM_DEBUG_MAX_ENTRIES = max(20, min(2000, int(os.getenv("LLM_DEBUG_MAX_ENTRIES", "250") or "250")))

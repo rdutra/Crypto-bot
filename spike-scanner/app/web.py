@@ -4,6 +4,7 @@ import os
 import re
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import aiohttp
 from aiohttp import web
@@ -102,6 +103,15 @@ def _fmt_llm_allowed(value) -> str:
     if parsed == 0:
         return "blocked"
     return "unknown"
+
+
+def _rotation_news_summary(row: dict[str, object]) -> str:
+    parts = [
+        str(int(row.get("news_count_24h") or 0)),
+        str(row.get("news_sentiment") or "").strip(),
+        str(row.get("news_risk_flags") or "").strip(),
+    ]
+    return _clip_text(" ".join(part for part in parts if part).strip(), 80)
 
 
 def _parse_int(raw_value, default: int, minimum: int, maximum: int) -> int:
@@ -215,6 +225,90 @@ def _safe_int(value: str | None) -> int | None:
         return int(value) if value not in {None, ""} else None
     except (TypeError, ValueError):
         return None
+
+
+def _detect_backend(target: str) -> str:
+    scheme = urlparse(str(target).strip()).scheme.lower()
+    return "postgres" if scheme.startswith("postgres") else "sqlite"
+
+
+def _normalize_postgres_target(target: str) -> str:
+    normalized = str(target).strip()
+    if normalized.startswith("postgresql+psycopg2://"):
+        return "postgresql://" + normalized[len("postgresql+psycopg2://") :]
+    if normalized.startswith("postgresql+psycopg://"):
+        return "postgresql://" + normalized[len("postgresql+psycopg://") :]
+    return normalized
+
+
+def _coin_news_db_target() -> str:
+    return str(os.getenv("COIN_NEWS_DB_URL", "")).strip()
+
+
+def _load_coin_news_rows(limit: int = 20) -> list[dict[str, object]]:
+    target = _coin_news_db_target()
+    if not target:
+        return []
+    backend = _detect_backend(target)
+    rows: list[dict[str, object]] = []
+    try:
+        if backend == "postgres":
+            import psycopg2
+            import psycopg2.extras
+
+            conn = psycopg2.connect(_normalize_postgres_target(target))
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(
+                """
+                SELECT pair, updated_ts, news_count_24h, sentiment, major_catalyst,
+                       risk_flags_json, last_news_age_minutes, note, top_headlines_json
+                FROM coin_news_summaries
+                ORDER BY news_count_24h DESC, updated_ts DESC, pair ASC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = [dict(row) for row in cur.fetchall() or []]
+            cur.close()
+            conn.close()
+        else:
+            import sqlite3
+
+            conn = sqlite3.connect(target)
+            conn.row_factory = sqlite3.Row
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT pair, updated_ts, news_count_24h, sentiment, major_catalyst,
+                           risk_flags_json, last_news_age_minutes, note, top_headlines_json
+                    FROM coin_news_summaries
+                    ORDER BY news_count_24h DESC, updated_ts DESC, pair ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            ]
+            conn.close()
+    except Exception:
+        return []
+
+    normalized: list[dict[str, object]] = []
+    for row in rows:
+        normalized.append(
+            {
+                "pair": str(row.get("pair") or ""),
+                "updated_ts": str(row.get("updated_ts") or ""),
+                "news_count_24h": int(row.get("news_count_24h") or 0),
+                "sentiment": str(row.get("sentiment") or ""),
+                "major_catalyst": bool(row.get("major_catalyst")),
+                "risk_flags": ", ".join(json.loads(str(row.get("risk_flags_json") or "[]"))),
+                "last_news_age_minutes": row.get("last_news_age_minutes"),
+                "note": str(row.get("note") or ""),
+                "headlines": " | ".join(json.loads(str(row.get("top_headlines_json") or "[]"))),
+            }
+        )
+    return normalized
 
 
 def _entry_diag_status(base_ok: int | None, final_ok: int | None) -> str:
@@ -434,6 +528,9 @@ def _rotation_pair_rows(event: dict[str, object], latest_entry_diags: dict[str, 
         for item in event.get("selected_pairs", [])
         if str(item).strip()
     }
+    candidate_news = event.get("candidate_news", {})
+    if not isinstance(candidate_news, dict):
+        candidate_news = {}
     rows: list[dict[str, object]] = []
 
     decisions = event.get("decisions", [])
@@ -445,6 +542,9 @@ def _rotation_pair_rows(event: dict[str, object], latest_entry_diags: dict[str, 
             if not pair:
                 continue
             diag = latest_entry_diags.get(pair, {})
+            news = item.get("coin_news_context", {})
+            if not isinstance(news, dict):
+                news = candidate_news.get(pair, {}) if isinstance(candidate_news.get(pair, {}), dict) else {}
             selected = bool(item.get("selected", pair in selected_pairs))
             stage = str(item.get("selection_status", "selected_for_bot" if selected else "ranked_rejected"))
             rows.append(
@@ -461,6 +561,15 @@ def _rotation_pair_rows(event: dict[str, object], latest_entry_diags: dict[str, 
                     "trading_signal_side": str(item.get("trading_signal_side", "")),
                     "trading_signal_score": item.get("trading_signal_score"),
                     "reason": str(item.get("selection_reason", item.get("note", ""))),
+                    "news_count_24h": news.get("news_count_24h"),
+                    "news_sentiment": str(news.get("sentiment", "")),
+                    "news_note": str(news.get("note", "")),
+                    "news_risk_flags": ", ".join(str(value) for value in news.get("risk_flags", []) if str(value).strip())
+                    if isinstance(news.get("risk_flags"), list)
+                    else "",
+                    "news_headlines": " | ".join(str(value) for value in news.get("top_headlines", []) if str(value).strip())
+                    if isinstance(news.get("top_headlines"), list)
+                    else "",
                     "bot_status": str(diag.get("status", "")),
                     "bot_failed": str(diag.get("failed", "")),
                     "bot_candle": str(diag.get("candle", "")),
@@ -476,6 +585,7 @@ def _rotation_pair_rows(event: dict[str, object], latest_entry_diags: dict[str, 
             if not pair:
                 continue
             diag = latest_entry_diags.get(pair, {})
+            news = candidate_news.get(pair, {}) if isinstance(candidate_news.get(pair, {}), dict) else {}
             reasons = item.get("reasons", [])
             if isinstance(reasons, list):
                 reason_text = ", ".join(str(value) for value in reasons if str(value).strip())
@@ -495,6 +605,15 @@ def _rotation_pair_rows(event: dict[str, object], latest_entry_diags: dict[str, 
                     "trading_signal_side": "",
                     "trading_signal_score": None,
                     "reason": reason_text,
+                    "news_count_24h": news.get("news_count_24h"),
+                    "news_sentiment": str(news.get("sentiment", "")),
+                    "news_note": str(news.get("note", "")),
+                    "news_risk_flags": ", ".join(str(value) for value in news.get("risk_flags", []) if str(value).strip())
+                    if isinstance(news.get("risk_flags"), list)
+                    else "",
+                    "news_headlines": " | ".join(str(value) for value in news.get("top_headlines", []) if str(value).strip())
+                    if isinstance(news.get("top_headlines"), list)
+                    else "",
                     "bot_status": str(diag.get("status", "")),
                     "bot_failed": str(diag.get("failed", "")),
                     "bot_candle": str(diag.get("candle", "")),
@@ -510,6 +629,7 @@ def _rotation_pair_rows(event: dict[str, object], latest_entry_diags: dict[str, 
             if not pair:
                 continue
             diag = latest_entry_diags.get(pair, {})
+            news = candidate_news.get(pair, {}) if isinstance(candidate_news.get(pair, {}), dict) else {}
             rows.append(
                 {
                     "pair": pair,
@@ -524,6 +644,15 @@ def _rotation_pair_rows(event: dict[str, object], latest_entry_diags: dict[str, 
                     "trading_signal_side": "",
                     "trading_signal_score": None,
                     "reason": str(item.get("reason", "")),
+                    "news_count_24h": news.get("news_count_24h"),
+                    "news_sentiment": str(news.get("sentiment", "")),
+                    "news_note": str(news.get("note", "")),
+                    "news_risk_flags": ", ".join(str(value) for value in news.get("risk_flags", []) if str(value).strip())
+                    if isinstance(news.get("risk_flags"), list)
+                    else "",
+                    "news_headlines": " | ".join(str(value) for value in news.get("top_headlines", []) if str(value).strip())
+                    if isinstance(news.get("top_headlines"), list)
+                    else "",
                     "bot_status": str(diag.get("status", "")),
                     "bot_failed": str(diag.get("failed", "")),
                     "bot_candle": str(diag.get("candle", "")),
@@ -537,6 +666,7 @@ def _rotation_pair_rows(event: dict[str, object], latest_entry_diags: dict[str, 
             if not pair:
                 continue
             diag = latest_entry_diags.get(pair, {})
+            news = candidate_news.get(pair, {}) if isinstance(candidate_news.get(pair, {}), dict) else {}
             rows.append(
                 {
                     "pair": pair,
@@ -551,6 +681,15 @@ def _rotation_pair_rows(event: dict[str, object], latest_entry_diags: dict[str, 
                     "trading_signal_side": "",
                     "trading_signal_score": None,
                     "reason": "not_in_pair_whitelist",
+                    "news_count_24h": news.get("news_count_24h"),
+                    "news_sentiment": str(news.get("sentiment", "")),
+                    "news_note": str(news.get("note", "")),
+                    "news_risk_flags": ", ".join(str(value) for value in news.get("risk_flags", []) if str(value).strip())
+                    if isinstance(news.get("risk_flags"), list)
+                    else "",
+                    "news_headlines": " | ".join(str(value) for value in news.get("top_headlines", []) if str(value).strip())
+                    if isinstance(news.get("top_headlines"), list)
+                    else "",
                     "bot_status": str(diag.get("status", "")),
                     "bot_failed": str(diag.get("failed", "")),
                     "bot_candle": str(diag.get("candle", "")),
@@ -791,6 +930,7 @@ async def dashboard(request: web.Request) -> web.Response:
     rotation_events = _rotation_log_rows(rotation_log_path)
     latest_rotation_event = rotation_events[0] if rotation_events else {}
     latest_rotation_pairs = _rotation_pair_rows(latest_rotation_event, _latest_entry_diag_by_pair(entry_diag_rows)) if latest_rotation_event else []
+    coin_news_rows = _load_coin_news_rows(limit=20)
     if symbol_filter:
         latest_rotation_pairs = [row for row in latest_rotation_pairs if str(row.get("pair", "")).upper() == symbol_filter]
     filtered_entry_diags = _filter_entry_diag_rows(
@@ -1004,6 +1144,9 @@ async def dashboard(request: web.Request) -> web.Response:
                 f"<td>{_fmt_num(row.get('market_rank_score'), 3)}</td>"
                 f"<td>{_esc(str(row.get('trading_signal_side') or ''))} {_fmt_num(row.get('trading_signal_score'), 2)}</td>"
                 f"<td>{_esc(_clip_text(row.get('reason'), 120))}</td>"
+                f"<td>{_esc(_rotation_news_summary(row))}</td>"
+                f"<td>{_esc(_clip_text(row.get('news_note'), 120))}</td>"
+                f"<td>{_esc(_clip_text(row.get('news_headlines'), 140))}</td>"
                 f"<td>{_esc(row.get('bot_status'))}</td>"
                 f"<td>{_utc_time_html(row.get('bot_candle'))}</td>"
                 f"<td>{_esc(_clip_text(row.get('bot_failed'), 120))}</td></tr>"
@@ -1020,6 +1163,21 @@ async def dashboard(request: web.Request) -> web.Response:
         f"candidates={int(latest_rotation_event.get('candidate_count', 0) or 0) if latest_rotation_event else 0} | "
         f"selected={int(latest_rotation_event.get('selected_count', len(latest_rotation_selected_pairs)) or 0) if latest_rotation_event else 0} | "
         f"prefilter_rejected={int(latest_rotation_event.get('prefilter_rejected_count', 0) or 0) if latest_rotation_event else 0}"
+    )
+    coin_news_rows_html = "\n".join(
+        [
+            (
+                f"<tr><td>{_esc(row.get('pair'))}</td>"
+                f"<td>{_utc_time_html(row.get('updated_ts'))}</td>"
+                f"<td>{int(row.get('news_count_24h', 0) or 0)}</td>"
+                f"<td>{_esc(row.get('sentiment'))}</td>"
+                f"<td>{'yes' if bool(row.get('major_catalyst')) else 'no'}</td>"
+                f"<td>{_esc(_clip_text(row.get('risk_flags'), 80))}</td>"
+                f"<td>{_esc(_clip_text(row.get('note'), 120))}</td>"
+                f"<td>{_esc(_clip_text(row.get('headlines'), 180))}</td></tr>"
+            )
+            for row in coin_news_rows
+        ]
     )
 
     alerts_pager = _pager_html(
@@ -1291,10 +1449,24 @@ async def dashboard(request: web.Request) -> web.Response:
           <thead>
             <tr>
               <th>Pair</th><th>Stage</th><th>Selected</th><th>Source</th><th>Regime</th><th>Risk</th><th>Conf</th><th>Final</th>
-              <th>Mkt Rank</th><th>Signal</th><th>Reason</th><th>Bot Status</th><th>Bot Candle</th><th>Bot Failed Checks</th>
+              <th>Mkt Rank</th><th>Signal</th><th>Reason</th><th>News</th><th>News Note</th><th>Headlines</th><th>Bot Status</th><th>Bot Candle</th><th>Bot Failed Checks</th>
             </tr>
           </thead>
           <tbody>{rotation_pairs_rows_html}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <h2>Coin News Cache</h2>
+    <div class="section">
+      <div class="wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Pair</th><th>Updated</th><th>Count 24h</th><th>Sentiment</th><th>Catalyst</th><th>Risk Flags</th><th>Note</th><th>Headlines</th>
+            </tr>
+          </thead>
+          <tbody>{coin_news_rows_html}</tbody>
         </table>
       </div>
     </div>

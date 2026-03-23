@@ -52,10 +52,25 @@ class PairCandidate(BaseModel):
     recent_avg_profit_pct: float = Field(default=0.0, ge=-100.0, le=100.0)
     recent_net_profit_pct: float = Field(default=0.0, ge=-1000.0, le=1000.0)
     historical_penalty: float = Field(default=0.0, ge=0.0, le=10.0)
+    coin_news_context: dict[str, Any] = Field(default_factory=dict)
+
+
+class MarketContext(BaseModel):
+    broad_move: Literal["risk_on", "risk_off", "mixed"] = "mixed"
+    session_label: str = Field(default="", max_length=32)
+    btc_change_pct: float = Field(default=0.0, ge=-100.0, le=100.0)
+    eth_change_pct: float = Field(default=0.0, ge=-100.0, le=100.0)
+    btc_rsi_1h: float = Field(default=0.0, ge=0.0, le=100.0)
+    eth_rsi_1h: float = Field(default=0.0, ge=0.0, le=100.0)
+    alt_above_ema20_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    alt_momentum_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    overextended: bool = False
+    note: str = Field(default="", max_length=160)
 
 
 class RankPairsRequest(BaseModel):
     candidates: List[PairCandidate] = Field(min_length=1, max_length=40)
+    market_context: MarketContext | None = None
     top_n: int = Field(default=3, ge=1, le=20)
     min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     allowed_risk_levels: List[RiskLiteral] = Field(default_factory=lambda: ["low", "medium"])

@@ -78,6 +78,19 @@ def _write_probation_state(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
+def _parse_utc(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _prune_probation_pairs(payload: dict) -> tuple[dict, list[str]]:
     now = datetime.now(timezone.utc)
     active: list[str] = []
@@ -94,13 +107,8 @@ def _prune_probation_pairs(payload: dict) -> tuple[dict, list[str]]:
         if not expires_at_raw:
             to_delete.append(pair)
             continue
-        try:
-            expires_at = datetime.fromisoformat(expires_at_raw)
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
-            else:
-                expires_at = expires_at.astimezone(timezone.utc)
-        except ValueError:
+        expires_at = _parse_utc(expires_at_raw)
+        if expires_at is None:
             to_delete.append(pair)
             continue
         if expires_at <= now:
@@ -136,6 +144,53 @@ def probation_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def _strong_momentum_recovery(item: dict) -> bool:
+    price = float(item.get("price") or 0.0)
+    ema20 = float(item.get("ema_20") or 0.0)
+    ema50 = float(item.get("ema_50") or 0.0)
+    rsi = float(item.get("rsi_14") or 0.0)
+    adx = float(item.get("adx_14") or 0.0)
+    atr_pct = float(item.get("atr_pct") or 0.0)
+    vol_z = float(item.get("volume_zscore") or 0.0)
+    trend_4h = str(item.get("trend_4h", "")).strip().lower()
+    market_structure = str(item.get("market_structure", "")).strip().lower()
+    return (
+        price > 0.0
+        and price >= ema20 >= ema50 > 0.0
+        and 55.0 <= rsi <= 68.0
+        and adx >= 28.0
+        and atr_pct >= 1.25
+        and vol_z >= 0.0
+        and trend_4h == "bullish"
+        and market_structure in {"higher_highs", "trend"}
+    )
+
+
+def _benchmark_positive_context(market_context: dict | None) -> bool:
+    if not isinstance(market_context, dict):
+        return False
+    broad_move = str(market_context.get("broad_move", "")).strip().lower()
+    btc_change = float(market_context.get("btc_change_pct") or 0.0)
+    eth_change = float(market_context.get("eth_change_pct") or 0.0)
+    alt_above = float(market_context.get("alt_above_ema20_ratio") or 0.0)
+    alt_momentum = float(market_context.get("alt_momentum_ratio") or 0.0)
+    overextended = bool(market_context.get("overextended"))
+    return (
+        broad_move == "risk_on"
+        and btc_change >= 0.4
+        and eth_change >= 0.4
+        and alt_above >= 0.58
+        and alt_momentum >= 0.45
+        and not overextended
+    )
+
+
+def _candidate_recovery_signal(item: dict, market_context: dict | None) -> tuple[bool, bool]:
+    strong_momentum = _strong_momentum_recovery(item)
+    benchmark_positive = _benchmark_positive_context(market_context)
+    return strong_momentum, strong_momentum and benchmark_positive
+
+
 def apply_probation_to_metrics(args: argparse.Namespace) -> int:
     payload = json.loads(args.metrics_json)
     state = _load_probation_state(args.state_path)
@@ -143,6 +198,9 @@ def apply_probation_to_metrics(args: argparse.Namespace) -> int:
     pairs = state.setdefault("pairs", {})
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(hours=max(1.0, float(args.hours)))
+    market_context = payload.get("market_context", {}) if isinstance(payload, dict) else {}
+    shortened_now: list[str] = []
+    released_now: list[str] = []
 
     for item in payload.get("candidates", []):
         if not isinstance(item, dict):
@@ -166,6 +224,30 @@ def apply_probation_to_metrics(args: argparse.Namespace) -> int:
             "expires_at": expires_at.isoformat(),
         }
 
+    recovery_shortened_expires_at = now + timedelta(hours=12)
+    for item in payload.get("candidates", []):
+        if not isinstance(item, dict):
+            continue
+        pair = str(item.get("pair", "")).strip().upper()
+        if not pair or pair not in pairs:
+            continue
+        strong_momentum, allow_reentry = _candidate_recovery_signal(item, market_context)
+        if allow_reentry:
+            pairs.pop(pair, None)
+            released_now.append(pair)
+            continue
+        if not strong_momentum:
+            continue
+        current_expires_at = _parse_utc(str(pairs.get(pair, {}).get("expires_at", "")))
+        if current_expires_at is None or recovery_shortened_expires_at >= current_expires_at:
+            continue
+        meta = dict(pairs.get(pair, {}))
+        meta["expires_at"] = recovery_shortened_expires_at.isoformat()
+        meta["recovery_reviewed_at"] = now.isoformat()
+        meta["reason"] = "recovery_watch"
+        pairs[pair] = meta
+        shortened_now.append(pair)
+
     state, active = _prune_probation_pairs(state)
     _write_probation_state(args.state_path, state)
 
@@ -186,6 +268,10 @@ def apply_probation_to_metrics(args: argparse.Namespace) -> int:
     added_now = sorted(set(active) - set(active_before))
     if added_now:
         notes.append(f"auto_probation_added:{' '.join(added_now)}")
+    if shortened_now:
+        notes.append(f"probation_shortened:{' '.join(sorted(set(shortened_now)))}")
+    if released_now:
+        notes.append(f"probation_released_early:{' '.join(sorted(set(released_now)))}")
     if active:
         notes.append(f"probation_filtered:{' '.join(active)}")
     payload["discovery_notes"] = notes

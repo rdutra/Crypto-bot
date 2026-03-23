@@ -7,6 +7,7 @@ DATA_DIR="/freqtrade/user_data/data"
 SHELL_HELPER="/workspace/scripts/shell_helpers.py"
 CONFIG_PATH="/freqtrade/user_data/config.json"
 ROTATION_LOG_PATH="/freqtrade/user_data/logs/llm-pair-rotation.log"
+COIN_NEWS_LOG="${LOG_DIR}/scheduler-coin-news.log"
 
 SCHED_DOWNLOAD_ENABLED="${SCHED_DOWNLOAD_ENABLED:-true}"
 SCHED_DOWNLOAD_TIME="${SCHED_DOWNLOAD_TIME:-02:15}"
@@ -17,6 +18,16 @@ SCHED_PRUNE_ENABLED="${SCHED_PRUNE_ENABLED:-true}"
 SCHED_PRUNE_TIME="${SCHED_PRUNE_TIME:-03:00}"
 SCHED_PRUNE_WEEKDAY="${SCHED_PRUNE_WEEKDAY:-0}"
 SCHED_PRUNE_DAYS="${SCHED_PRUNE_DAYS:-180}"
+
+COIN_NEWS_ENABLED="${COIN_NEWS_ENABLED:-true}"
+COIN_NEWS_UPDATE_ENABLED="${COIN_NEWS_UPDATE_ENABLED:-true}"
+COIN_NEWS_UPDATE_INTERVAL_MINUTES="${COIN_NEWS_UPDATE_INTERVAL_MINUTES:-15}"
+COIN_NEWS_DB_TARGET="${COIN_NEWS_DB_URL:-${COIN_NEWS_DB_PATH:-}}"
+COIN_NEWS_CACHE_PATH="${COIN_NEWS_CACHE_PATH:-/freqtrade/user_data/logs/coin-news-cache.json}"
+COIN_NEWS_CACHE_TTL_SECONDS="${COIN_NEWS_CACHE_TTL_SECONDS:-900}"
+COIN_NEWS_LOOKBACK_HOURS="${COIN_NEWS_LOOKBACK_HOURS:-24}"
+COIN_NEWS_TIMEOUT_SECONDS="${COIN_NEWS_TIMEOUT_SECONDS:-8}"
+COIN_NEWS_FEED_URLS="${COIN_NEWS_FEED_URLS:-}"
 
 DOWNLOAD_LOG="${LOG_DIR}/scheduler-download.log"
 PRUNE_LOG="${LOG_DIR}/scheduler-prune.log"
@@ -36,9 +47,7 @@ is_true() {
 
 run_download() {
   log "[scheduler] Running download-data"
-  WHITELIST_PAIRS="$(python3 "${SHELL_HELPER}" current-whitelist-pairs "${CONFIG_PATH}")"
-  RECENT_ROTATION_PAIRS="$(python3 "${SHELL_HELPER}" recent-rotation-pairs "${ROTATION_LOG_PATH}" 8 20)"
-  ALL_PAIRS="$(python3 "${SHELL_HELPER}" unique-pairs "${SCHED_DOWNLOAD_PAIRS} ${WHITELIST_PAIRS} ${RECENT_ROTATION_PAIRS}")"
+  ALL_PAIRS="$(collect_pairs)"
   # Intentional word splitting for pair list.
   # shellcheck disable=SC2086
   if freqtrade download-data \
@@ -51,6 +60,34 @@ run_download() {
     log "[scheduler] download-data completed"
   else
     log "[scheduler] download-data failed (check ${DOWNLOAD_LOG})"
+  fi
+}
+
+collect_pairs() {
+  WHITELIST_PAIRS="$(python3 "${SHELL_HELPER}" current-whitelist-pairs "${CONFIG_PATH}")"
+  RECENT_ROTATION_PAIRS="$(python3 "${SHELL_HELPER}" recent-rotation-pairs "${ROTATION_LOG_PATH}" 8 20)"
+  python3 "${SHELL_HELPER}" unique-pairs "${SCHED_DOWNLOAD_PAIRS} ${WHITELIST_PAIRS} ${RECENT_ROTATION_PAIRS}"
+}
+
+run_coin_news_update() {
+  if ! is_true "${COIN_NEWS_ENABLED}" || ! is_true "${COIN_NEWS_UPDATE_ENABLED}" || [ -z "${COIN_NEWS_DB_TARGET}" ]; then
+    return
+  fi
+  ALL_PAIRS="$(collect_pairs)"
+  log "[scheduler] Updating coin-news summaries"
+  if python3 /workspace/scripts/coin_news_updater.py \
+    --db-target "${COIN_NEWS_DB_TARGET}" \
+    --pairs "${ALL_PAIRS}" \
+    --cache-path "${COIN_NEWS_CACHE_PATH}" \
+    --cache-ttl-seconds "${COIN_NEWS_CACHE_TTL_SECONDS}" \
+    --lookback-hours "${COIN_NEWS_LOOKBACK_HOURS}" \
+    --timeout-seconds "${COIN_NEWS_TIMEOUT_SECONDS}" \
+    --feed-urls "${COIN_NEWS_FEED_URLS}" \
+    >>"${COIN_NEWS_LOG}" 2>&1; then
+    date +%s >"${STATE_DIR}/last_coin_news_epoch"
+    log "[scheduler] coin-news update completed"
+  else
+    log "[scheduler] coin-news update failed (check ${COIN_NEWS_LOG})"
   fi
 }
 
@@ -73,11 +110,13 @@ run_prune() {
 log "[scheduler] started"
 log "[scheduler] download enabled=${SCHED_DOWNLOAD_ENABLED} time=${SCHED_DOWNLOAD_TIME} timerange=${SCHED_DOWNLOAD_TIMERANGE}"
 log "[scheduler] prune enabled=${SCHED_PRUNE_ENABLED} time=${SCHED_PRUNE_TIME} weekday=${SCHED_PRUNE_WEEKDAY} days=${SCHED_PRUNE_DAYS}"
+log "[scheduler] coin-news enabled=${COIN_NEWS_ENABLED} update_enabled=${COIN_NEWS_UPDATE_ENABLED} interval_min=${COIN_NEWS_UPDATE_INTERVAL_MINUTES}"
 
 while true; do
   NOW_HM="$(date +%H:%M)"
   TODAY="$(date +%F)"
   WEEKDAY="$(date +%w)"
+  NOW_EPOCH="$(date +%s)"
 
   if is_true "${SCHED_DOWNLOAD_ENABLED}" && [ "${NOW_HM}" = "${SCHED_DOWNLOAD_TIME}" ]; then
     LAST_DOWNLOAD="$(cat "${STATE_DIR}/last_download_date" 2>/dev/null || true)"
@@ -90,6 +129,15 @@ while true; do
     LAST_PRUNE="$(cat "${STATE_DIR}/last_prune_date" 2>/dev/null || true)"
     if [ "${LAST_PRUNE}" != "${TODAY}" ]; then
       run_prune
+    fi
+  fi
+
+  if is_true "${COIN_NEWS_ENABLED}" && is_true "${COIN_NEWS_UPDATE_ENABLED}" && [ -n "${COIN_NEWS_DB_TARGET}" ]; then
+    LAST_NEWS_EPOCH="$(cat "${STATE_DIR}/last_coin_news_epoch" 2>/dev/null || true)"
+    LAST_NEWS_EPOCH="${LAST_NEWS_EPOCH:-0}"
+    NEXT_NEWS_EPOCH=$((LAST_NEWS_EPOCH + COIN_NEWS_UPDATE_INTERVAL_MINUTES * 60))
+    if [ "${NOW_EPOCH}" -ge "${NEXT_NEWS_EPOCH}" ]; then
+      run_coin_news_update
     fi
   fi
 

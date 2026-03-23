@@ -180,9 +180,12 @@ services:
       --strategy ${FREQTRADE_STRATEGY:-LlmHybridStrategy}
 
   scheduler:
-    image: freqtradeorg/freqtrade:stable
+    image: crypto-bot-freqtrade:latest
     container_name: freqtrade-scheduler
     restart: unless-stopped
+    depends_on:
+      stack-postgres:
+        condition: service_healthy
     environment:
       FREQTRADE__EXCHANGE__KEY: ${BINANCE_API_KEY:-}
       FREQTRADE__EXCHANGE__SECRET: ${BINANCE_API_SECRET:-}
@@ -195,6 +198,15 @@ services:
       SCHED_PRUNE_WEEKDAY: ${SCHED_PRUNE_WEEKDAY:-0}
       SCHED_PRUNE_DAYS: ${SCHED_PRUNE_DAYS:-180}
       SCHED_STATE_DIR: ${SCHED_STATE_DIR:-/freqtrade/user_data/logs/scheduler_state}
+      COIN_NEWS_ENABLED: ${COIN_NEWS_ENABLED:-true}
+      COIN_NEWS_UPDATE_ENABLED: ${COIN_NEWS_UPDATE_ENABLED:-true}
+      COIN_NEWS_UPDATE_INTERVAL_MINUTES: ${COIN_NEWS_UPDATE_INTERVAL_MINUTES:-15}
+      COIN_NEWS_DB_URL: ${COIN_NEWS_DB_URL:-postgresql+psycopg2://${STACK_POSTGRES_USER:-stack}:${STACK_POSTGRES_PASSWORD:-stack}@stack-postgres:5432/${STACK_ANALYTICS_DB:-stack_analytics}}
+      COIN_NEWS_CACHE_PATH: ${COIN_NEWS_CACHE_PATH:-/freqtrade/user_data/logs/coin-news-cache.json}
+      COIN_NEWS_CACHE_TTL_SECONDS: ${COIN_NEWS_CACHE_TTL_SECONDS:-900}
+      COIN_NEWS_LOOKBACK_HOURS: ${COIN_NEWS_LOOKBACK_HOURS:-24}
+      COIN_NEWS_TIMEOUT_SECONDS: ${COIN_NEWS_TIMEOUT_SECONDS:-8}
+      COIN_NEWS_FEED_URLS: ${COIN_NEWS_FEED_URLS:-}
       TZ: ${TZ:-UTC}
     volumes:
       - ./freqtrade/user_data:/freqtrade/user_data
@@ -236,6 +248,9 @@ services:
       LLM_ROTATE_SPIKE_DB_PATH: ${LLM_ROTATE_SPIKE_DB_PATH:-./freqtrade/user_data/logs/spike-scanner.sqlite}
       LLM_ROTATE_OUTCOME_DB_URL: ${LLM_ROTATE_OUTCOME_DB_URL:-}
       LLM_ROTATE_OUTCOME_DB_PATH: ${LLM_ROTATE_OUTCOME_DB_PATH:-./freqtrade/user_data/logs/rotation-outcomes.sqlite}
+      COIN_NEWS_ENABLED: ${COIN_NEWS_ENABLED:-true}
+      COIN_NEWS_DB_URL: ${COIN_NEWS_DB_URL:-postgresql+psycopg2://${STACK_POSTGRES_USER:-stack}:${STACK_POSTGRES_PASSWORD:-stack}@stack-postgres:5432/${STACK_ANALYTICS_DB:-stack_analytics}}
+      COIN_NEWS_MAX_AGE_MINUTES: ${COIN_NEWS_MAX_AGE_MINUTES:-180}
       BINANCE_REST_BASE: ${BINANCE_REST_BASE:-https://api.binance.com}
       ROTATE_SKIP_BOOTSTRAP_SERVICES: "true"
       ROTATE_DISABLE_LOCK: "true"
@@ -310,6 +325,7 @@ services:
       SPIKE_LOG_PATH: ${SPIKE_LOG_PATH:-/data/spike-alerts.jsonl}
       SPIKE_DB_URL: ${SPIKE_DB_URL:-}
       SPIKE_DB_PATH: ${SPIKE_DB_PATH:-/data/spike-scanner.sqlite}
+      COIN_NEWS_DB_URL: ${COIN_NEWS_DB_URL:-postgresql+psycopg2://${STACK_POSTGRES_USER:-stack}:${STACK_POSTGRES_PASSWORD:-stack}@stack-postgres:5432/${STACK_ANALYTICS_DB:-stack_analytics}}
       SPIKE_ROTATION_LOG_PATH: ${SPIKE_ROTATION_LOG_PATH:-/data/llm-pair-rotation.log}
       SPIKE_OUTCOME_HORIZONS_MINUTES: ${SPIKE_OUTCOME_HORIZONS_MINUTES:-60,240,1440,2880}
       SPIKE_OUTCOME_LOOP_SECONDS: ${SPIKE_OUTCOME_LOOP_SECONDS:-30}

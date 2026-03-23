@@ -90,6 +90,45 @@ class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"candidate_sources":["spike"]', prompt)
         self.assertIn("scanner-detected momentum candidate", prompt)
 
+    def test_build_rank_prompt_includes_market_context(self) -> None:
+        req = bot_main.RankPairsRequest(
+            candidates=[_sample_candidate()],
+            market_context=bot_main.MarketContext(
+                broad_move="risk_on",
+                session_label="europe",
+                btc_change_pct=1.2,
+                eth_change_pct=1.0,
+                btc_rsi_1h=73.0,
+                eth_rsi_1h=71.0,
+                alt_above_ema20_ratio=0.8,
+                alt_momentum_ratio=0.7,
+                overextended=True,
+                note="broad risk-on move with overextended majors",
+            ),
+        )
+        prompt = bot_main.build_rank_prompt(req)
+        self.assertIn('"market_context"', prompt)
+        self.assertIn('"broad_move":"risk_on"', prompt)
+        self.assertIn("overextended majors", prompt)
+
+    def test_build_rank_prompt_includes_coin_news_context(self) -> None:
+        candidate = _sample_candidate()
+        candidate.coin_news_context = {
+            "news_count_24h": 2,
+            "sentiment": "negative",
+            "sentiment_score": -1.2,
+            "major_catalyst": False,
+            "risk_flags": ["exploit"],
+            "last_news_age_minutes": 45,
+            "top_headlines": ["Protocol exploit drains treasury"],
+            "note": "risk flags: exploit",
+        }
+        req = bot_main.RankPairsRequest(candidates=[candidate])
+        prompt = bot_main.build_rank_prompt(req)
+        self.assertIn('"coin_news_context"', prompt)
+        self.assertIn('"risk_flags":["exploit"]', prompt)
+        self.assertIn("negative news sentiment", prompt)
+
     async def test_rank_pairs_returns_extended_skill_meta_without_sell_penalty_by_default(self) -> None:
         req = bot_main.RankPairsRequest(candidates=[_sample_candidate()])
 
@@ -459,14 +498,14 @@ class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
                             "pair": "CAKE/USDT",
                             "regime": "mean_reversion",
                             "risk_level": "high",
-                            "confidence": 0.84,
+                            "confidence": 0.89,
                             "note": "reversion",
                         },
                         {
                             "pair": "WLD/USDT",
                             "regime": "mean_reversion",
                             "risk_level": "high",
-                            "confidence": 0.84,
+                            "confidence": 0.88,
                             "note": "spike reversion",
                         },
                     ]

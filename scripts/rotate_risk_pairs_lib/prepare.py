@@ -4,11 +4,13 @@ import argparse
 import json
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from .common import finite, parse_pairs
+from .news import load_coin_news_contexts
 
 
 def _load_prepare_dependencies():
@@ -44,6 +46,14 @@ def prepare_candidates(args: argparse.Namespace) -> int:
     )
     pair_stats_lookback_hours = 168.0
     pair_stats_min_trades = 2
+    coin_news_enabled = str(os.getenv("COIN_NEWS_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
+    coin_news_db_target = str(
+        os.getenv(
+            "COIN_NEWS_DB_URL",
+            os.getenv("COIN_NEWS_DB_PATH", os.getenv("LLM_ROTATE_OUTCOME_DB_URL", "")),
+        )
+    ).strip()
+    coin_news_max_age_minutes = max(30, int(float(os.getenv("COIN_NEWS_MAX_AGE_MINUTES", "180"))))
 
     def _is_postgres_target(target: str) -> bool:
         return urlparse(str(target).strip()).scheme.lower().startswith("postgres")
@@ -197,6 +207,84 @@ def prepare_candidates(args: argparse.Namespace) -> int:
         if row["close"] >= row["ema20"]:
             score += 0.5
         return round(score, 2)
+
+    def change_pct(df) -> float:
+        if df is None or len(df) < 2:
+            return 0.0
+        try:
+            close_now = float(df.iloc[-1]["close"])
+            close_prev = float(df.iloc[-2]["close"])
+        except Exception:
+            return 0.0
+        if close_prev == 0.0:
+            return 0.0
+        return ((close_now / close_prev) - 1.0) * 100.0
+
+    def session_label(now_utc: datetime) -> str:
+        hour = now_utc.hour
+        if 0 <= hour < 7:
+            return "asia"
+        if 7 <= hour < 12:
+            return "europe"
+        if 12 <= hour < 13:
+            return "us_preopen"
+        if 13 <= hour < 20:
+            return "us_cash"
+        return "offhours"
+
+    def build_market_context(candidate_rows: list[dict[str, Any]]) -> dict[str, Any]:
+        now_utc = datetime.now(timezone.utc)
+        btc_df, _ = get_df("BTC/USDT", args.rotate_timeframe, args.rotate_lookback_candles)
+        eth_df, _ = get_df("ETH/USDT", args.rotate_timeframe, args.rotate_lookback_candles)
+        btc_ind = add_indicators(btc_df)
+        eth_ind = add_indicators(eth_df)
+
+        btc_change = change_pct(btc_df)
+        eth_change = change_pct(eth_df)
+        btc_rsi = finite(btc_ind.iloc[-1].get("rsi")) if btc_ind is not None and not btc_ind.empty else 0.0
+        eth_rsi = finite(eth_ind.iloc[-1].get("rsi")) if eth_ind is not None and not eth_ind.empty else 0.0
+
+        alt_rows = [row for row in candidate_rows if row.get("pair") not in {"BTC/USDT", "ETH/USDT", "BNB/USDT"}]
+        if not alt_rows:
+            alt_rows = candidate_rows
+        alt_count = max(1, len(alt_rows))
+        above_ema20 = sum(1 for row in alt_rows if float(row.get("price") or 0.0) > float(row.get("ema_20") or 0.0))
+        momentum = sum(
+            1
+            for row in alt_rows
+            if float(row.get("price") or 0.0) > float(row.get("ema_20") or 0.0)
+            and float(row.get("rsi_14") or 0.0) >= 55.0
+        )
+        alt_above_ema20_ratio = above_ema20 / float(alt_count)
+        alt_momentum_ratio = momentum / float(alt_count)
+        overextended = (btc_rsi or 0.0) >= 72.0 and (eth_rsi or 0.0) >= 70.0 and alt_momentum_ratio >= 0.6
+
+        broad_move = "mixed"
+        if btc_change >= 0.8 and eth_change >= 0.8 and alt_above_ema20_ratio >= 0.6:
+            broad_move = "risk_on"
+        elif btc_change <= -0.8 and eth_change <= -0.8 and alt_above_ema20_ratio <= 0.4:
+            broad_move = "risk_off"
+
+        note = "mixed market backdrop"
+        if broad_move == "risk_on" and overextended:
+            note = "broad risk-on move with overextended majors"
+        elif broad_move == "risk_on":
+            note = "broad risk-on move"
+        elif broad_move == "risk_off":
+            note = "broad risk-off move"
+
+        return {
+            "broad_move": broad_move,
+            "session_label": session_label(now_utc),
+            "btc_change_pct": round(btc_change, 4),
+            "eth_change_pct": round(eth_change, 4),
+            "btc_rsi_1h": round(float(btc_rsi or 0.0), 2),
+            "eth_rsi_1h": round(float(eth_rsi or 0.0), 2),
+            "alt_above_ema20_ratio": round(alt_above_ema20_ratio, 4),
+            "alt_momentum_ratio": round(alt_momentum_ratio, 4),
+            "overextended": overextended,
+            "note": note,
+        }
 
     def add_indicators(df):
         if df is None or df.empty:
@@ -392,8 +480,11 @@ def prepare_candidates(args: argparse.Namespace) -> int:
         "skipped": [],
         "whitelist_missing": [],
         "discovery_notes": discovery_notes,
+        "market_context": None,
     }
     pair_trade_stats = collect_pair_trade_stats(trades_db_target, pair_stats_lookback_hours)
+    coin_news_by_pair: dict[str, dict[str, Any]] = {}
+    news_status = "disabled"
 
     def get_df(pair: str, tf: str, lb: int):
         key = (pair, tf)
@@ -530,5 +621,30 @@ def prepare_candidates(args: argparse.Namespace) -> int:
         )
     if exchange_fallback_state["skipped_budget"] > 0:
         result["discovery_notes"].append(f"exchange_budget_exhausted_count={exchange_fallback_state['skipped_budget']}")
+    if coin_news_enabled and result["candidates"]:
+        candidate_pairs = [str(item.get("pair", "")).upper() for item in result["candidates"] if str(item.get("pair", "")).strip()]
+        coin_news_by_pair, news_status = load_coin_news_contexts(
+            db_target=coin_news_db_target,
+            pairs=candidate_pairs,
+            max_age_minutes=coin_news_max_age_minutes,
+        )
+        result["discovery_notes"].append(f"coin_news:{news_status}:pairs={len(coin_news_by_pair)}")
+        for item in result["candidates"]:
+            pair = str(item.get("pair", "")).upper()
+            item["coin_news_context"] = coin_news_by_pair.get(
+                pair,
+                {
+                    "news_count_24h": 0,
+                    "sentiment": "neutral",
+                    "sentiment_score": 0.0,
+                    "major_catalyst": False,
+                    "risk_flags": [],
+                    "last_news_age_minutes": None,
+                    "note": "no_cached_news",
+                    "top_headlines": [],
+                },
+            )
+    if result["candidates"]:
+        result["market_context"] = build_market_context(result["candidates"])
     print(json.dumps(result, separators=(",", ":")))
     return 0

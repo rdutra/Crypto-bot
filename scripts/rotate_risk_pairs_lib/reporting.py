@@ -81,6 +81,7 @@ def build_rank_request(args: argparse.Namespace) -> int:
     payload = json.loads(args.metrics_json)
     body = {
         "candidates": payload["candidates"],
+        "market_context": payload.get("market_context"),
         "top_n": args.top_n,
         "min_confidence": args.min_confidence,
         "allowed_risk_levels": [item.strip().lower() for item in args.allowed_risk.replace(",", " ").split() if item.strip()] or ["low", "medium"],
@@ -285,6 +286,11 @@ def build_rotation_entry(args: argparse.Namespace) -> int:
     }
     candidate_prices = {item.get("pair"): item.get("price") for item in meta.get("candidates", [])}
     candidate_atr_pct = {item.get("pair"): item.get("atr_pct") for item in meta.get("candidates", [])}
+    candidate_news = {
+        str(item.get("pair", "")).upper(): item.get("coin_news_context", {})
+        for item in meta.get("candidates", [])
+        if str(item.get("pair", "")).strip()
+    }
     prefilter_rejected = meta.get("prefilter_rejected", [])
     if not isinstance(prefilter_rejected, list):
         prefilter_rejected = []
@@ -340,6 +346,7 @@ def build_rotation_entry(args: argparse.Namespace) -> int:
                 "final_score": final_score_value,
                 "price": candidate_prices.get(pair),
                 "atr_pct": candidate_atr_pct.get(pair),
+                "coin_news_context": candidate_news.get(pair, {}),
                 "note": item.get("note"),
                 "selected": selected,
                 "selection_status": selection_status,
@@ -364,6 +371,7 @@ def build_rotation_entry(args: argparse.Namespace) -> int:
         "event": "rotation_decision",
         "source": ranked.get("source"),
         "reason": ranked.get("reason"),
+        "market_context": meta.get("market_context"),
         "selected_pairs": parse_pairs(args.selected_pairs_override) or ranked.get("selected_pairs", []),
         "market_rank_source": ranked.get("market_rank_source"),
         "market_rank_errors": ranked.get("market_rank_errors", []),
@@ -391,6 +399,7 @@ def build_rotation_entry(args: argparse.Namespace) -> int:
         "selected_source_counts": selected_source_counts,
         "discovery_notes": meta.get("discovery_notes", []),
         "prefilter_notes": meta.get("prefilter_notes", []),
+        "candidate_news": candidate_news,
         "prefilter_rejected": prefilter_rejected,
         "whitelist_missing": meta.get("whitelist_missing", []),
         "skipped": meta.get("skipped", []),
