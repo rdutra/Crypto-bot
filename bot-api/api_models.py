@@ -47,6 +47,11 @@ class PairCandidate(BaseModel):
     deterministic_score: float = Field(default=0.0, ge=0.0, le=100.0)
     data_source: str = ""
     candidate_sources: List[str] = Field(default_factory=list)
+    recent_closed_trades: int = Field(default=0, ge=0)
+    recent_win_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    recent_avg_profit_pct: float = Field(default=0.0, ge=-100.0, le=100.0)
+    recent_net_profit_pct: float = Field(default=0.0, ge=-1000.0, le=1000.0)
+    historical_penalty: float = Field(default=0.0, ge=0.0, le=10.0)
 
 
 class RankPairsRequest(BaseModel):

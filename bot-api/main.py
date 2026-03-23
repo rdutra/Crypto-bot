@@ -70,6 +70,11 @@ FALLBACK_CONFIDENCE_SCALE = max(8.0, float(os.getenv("LLM_FALLBACK_CONFIDENCE_SC
 FALLBACK_CONFIDENCE_CAP = min(0.95, max(0.2, float(os.getenv("LLM_FALLBACK_CONFIDENCE_CAP", "0.72") or "0.72")))
 FALLBACK_SMART_BUY_BASE = min(0.95, max(0.0, float(os.getenv("LLM_FALLBACK_SMART_BUY_BASE", "0.52") or "0.52")))
 FALLBACK_SMART_BUY_MULT = min(0.5, max(0.0, float(os.getenv("LLM_FALLBACK_SMART_BUY_MULT", "0.15") or "0.15")))
+MEAN_REVERSION_PENALTY = max(0.0, float(os.getenv("LLM_MEAN_REVERSION_PENALTY", "0.9") or "0.9"))
+MEAN_REVERSION_HIGH_RISK_PENALTY = max(
+    0.0, float(os.getenv("LLM_MEAN_REVERSION_HIGH_RISK_PENALTY", "0.6") or "0.6")
+)
+SPIKE_MEAN_REVERSION_PENALTY = max(0.0, float(os.getenv("LLM_SPIKE_MEAN_REVERSION_PENALTY", "0.25") or "0.25"))
 
 LLM_DEBUG_ENABLED = str(os.getenv("LLM_DEBUG_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
 LLM_DEBUG_MAX_ENTRIES = max(20, min(2000, int(os.getenv("LLM_DEBUG_MAX_ENTRIES", "250") or "250")))
@@ -295,10 +300,19 @@ def _rank_response(
             final_score += trading_signal_score * TRADING_SIGNAL_BUY_BONUS_MULT
         elif trading_signal_side == "sell" and TRADING_SIGNAL_SELL_PENALTY_MULT > 0.0:
             final_score -= trading_signal_score * TRADING_SIGNAL_SELL_PENALTY_MULT
+        historical_penalty = max(0.0, min(10.0, float(by_pair[key].historical_penalty or 0.0)))
+        if historical_penalty > 0.0:
+            final_score -= historical_penalty
         if regime in allowed_regimes:
             final_score += 0.75
         if risk_level == "low":
             final_score += 0.25
+        candidate_sources = {item.strip().lower() for item in by_pair[key].candidate_sources if item.strip()}
+        if regime == "mean_reversion":
+            mean_reversion_penalty = SPIKE_MEAN_REVERSION_PENALTY if "spike" in candidate_sources else MEAN_REVERSION_PENALTY
+            if risk_level == "high":
+                mean_reversion_penalty += MEAN_REVERSION_HIGH_RISK_PENALTY
+            final_score -= mean_reversion_penalty
 
         ranked.append(
             RankedPair(

@@ -127,6 +127,11 @@ def build_rank_prompt(
                 "trend_4h": candidate.trend_4h,
                 "market_structure": candidate.market_structure,
                 "deterministic_score": candidate.deterministic_score,
+                "recent_closed_trades": candidate.recent_closed_trades,
+                "recent_win_rate": candidate.recent_win_rate,
+                "recent_avg_profit_pct": candidate.recent_avg_profit_pct,
+                "recent_net_profit_pct": candidate.recent_net_profit_pct,
+                "historical_penalty": candidate.historical_penalty,
                 "market_rank_score": rank_info.get("rank_score", 0.0),
                 "market_rank_hits": rank_info.get("hits", 0),
                 "market_rank_trending": rank_info.get("trending_rank"),
@@ -154,6 +159,8 @@ def build_rank_prompt(
         "- Do not default a spike candidate to no_trade solely because the higher timeframe trend is not cleanly bullish.\n"
         "- market_rank_score is a secondary prior from Binance market ranks (0..1).\n"
         "- trading_signal_side/score is an extra prior from Binance trading-signal skill.\n"
+        "- recent_* fields summarize recent realized performance for that pair.\n"
+        "- Lower confidence or prefer no_trade when recent pair performance is persistently negative, unless the setup is an exceptional spike candidate.\n"
         "- If uncertain, use no_trade with high risk.\n"
         "- Keep note under 140 characters.\n"
         f"Input JSON:\n{json.dumps({'candidates': compact_candidates}, separators=(',', ':'))}"

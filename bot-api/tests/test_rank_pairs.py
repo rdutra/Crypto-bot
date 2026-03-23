@@ -284,6 +284,82 @@ class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_pair["SOL/USDT"].note, "single:recovered")
         self.assertNotEqual(by_pair["SOL/USDT"].note, "missing_pair_decision")
 
+    async def test_rank_pairs_penalizes_non_spike_mean_reversion_and_bad_history(self) -> None:
+        req = bot_main.RankPairsRequest(
+            candidates=[
+                bot_main.PairCandidate(
+                    pair="CAKE/USDT",
+                    timeframe="1h",
+                    price=2.0,
+                    ema_20=1.98,
+                    ema_50=1.95,
+                    ema_200=1.8,
+                    rsi_14=58.0,
+                    adx_14=18.0,
+                    atr_pct=2.1,
+                    volume_zscore=0.8,
+                    trend_4h="mixed",
+                    market_structure="mixed",
+                    deterministic_score=8.5,
+                    recent_closed_trades=5,
+                    recent_win_rate=0.2,
+                    recent_avg_profit_pct=-0.8,
+                    recent_net_profit_pct=-3.0,
+                    historical_penalty=2.8,
+                ),
+                bot_main.PairCandidate(
+                    pair="WLD/USDT",
+                    timeframe="1h",
+                    price=1.0,
+                    ema_20=0.98,
+                    ema_50=0.97,
+                    ema_200=0.9,
+                    rsi_14=60.0,
+                    adx_14=20.0,
+                    atr_pct=3.2,
+                    volume_zscore=1.1,
+                    trend_4h="mixed",
+                    market_structure="mixed",
+                    deterministic_score=8.0,
+                    candidate_sources=["spike"],
+                ),
+            ],
+            allowed_risk_levels=["low", "medium", "high"],
+            allowed_regimes=["trend_pullback", "breakout", "mean_reversion"],
+        )
+
+        async def fake_run_llm(_: str) -> str:
+            return json.dumps(
+                {
+                    "decisions": [
+                        {
+                            "pair": "CAKE/USDT",
+                            "regime": "mean_reversion",
+                            "risk_level": "high",
+                            "confidence": 0.9,
+                            "note": "reversion",
+                        },
+                        {
+                            "pair": "WLD/USDT",
+                            "regime": "mean_reversion",
+                            "risk_level": "high",
+                            "confidence": 0.9,
+                            "note": "spike reversion",
+                        },
+                    ]
+                }
+            )
+
+        original_run_llm = bot_main._run_llm
+        try:
+            bot_main._run_llm = fake_run_llm
+            response = await bot_main.rank_pairs(req)
+        finally:
+            bot_main._run_llm = original_run_llm
+
+        by_pair = {decision.pair: decision for decision in response.decisions}
+        self.assertLess(by_pair["CAKE/USDT"].final_score, by_pair["WLD/USDT"].final_score)
+
 
 if __name__ == "__main__":
     unittest.main()

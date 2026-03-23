@@ -6,6 +6,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .common import finite, parse_pairs
 
@@ -32,6 +33,139 @@ def prepare_candidates(args: argparse.Namespace) -> int:
         0,
         int(float(os.getenv("ROTATE_MAX_EXCHANGE_FALLBACKS", os.getenv("LLM_ROTATE_MAX_EXCHANGE_FALLBACKS", "6")))),
     )
+    trades_db_target = (
+        str(
+            os.getenv(
+                "ROTATE_TRADES_DB_URL",
+                os.getenv("FREQTRADE_DB_URL", os.getenv("ROTATE_TRADES_DB_PATH", "")),
+            )
+        )
+        .strip()
+    )
+    pair_stats_lookback_hours = 168.0
+    pair_stats_min_trades = 2
+
+    def _is_postgres_target(target: str) -> bool:
+        return urlparse(str(target).strip()).scheme.lower().startswith("postgres")
+
+    def _normalize_postgres_target(target: str) -> str:
+        normalized = str(target).strip()
+        if normalized.startswith("postgresql+psycopg2://"):
+            return "postgresql://" + normalized[len("postgresql+psycopg2://") :]
+        if normalized.startswith("postgresql+psycopg://"):
+            return "postgresql://" + normalized[len("postgresql+psycopg://") :]
+        return normalized
+
+    def collect_pair_trade_stats(target: str, lookback_hours: float) -> dict[str, dict[str, float]]:
+        if not target:
+            return {}
+        if _is_postgres_target(target):
+            try:
+                import psycopg2
+                import psycopg2.extras
+                from datetime import datetime, timedelta, timezone
+
+                cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+                conn = psycopg2.connect(_normalize_postgres_target(target))
+                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cur.execute(
+                    """
+                    SELECT
+                        pair,
+                        COUNT(*) AS closed_trades,
+                        COALESCE(AVG(close_profit), 0.0) AS avg_profit_ratio,
+                        COALESCE(SUM(close_profit), 0.0) AS net_profit_ratio,
+                        COALESCE(SUM(CASE WHEN close_profit > 0 THEN 1 ELSE 0 END), 0) AS wins
+                    FROM trades
+                    WHERE is_open = false
+                      AND close_date IS NOT NULL
+                      AND close_date >= %s
+                    GROUP BY pair
+                    """
+                    ,
+                    (cutoff,),
+                )
+                rows = cur.fetchall() or []
+                cur.close()
+                conn.close()
+            except Exception:
+                return {}
+            result: dict[str, dict[str, float]] = {}
+            for row in rows:
+                pair = str(row.get("pair", "")).strip().upper()
+                if not pair:
+                    continue
+                closed = int(row.get("closed_trades") or 0)
+                wins = int(row.get("wins") or 0)
+                result[pair] = {
+                    "closed_trades": float(closed),
+                    "win_rate": (wins / closed) if closed > 0 else 0.0,
+                    "avg_profit_pct": float(row.get("avg_profit_ratio") or 0.0) * 100.0,
+                    "net_profit_pct": float(row.get("net_profit_ratio") or 0.0) * 100.0,
+                }
+            return result
+
+        db_path = Path(target)
+        if not db_path.exists():
+            return {}
+        try:
+            import sqlite3
+            from datetime import datetime, timedelta, timezone
+
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=lookback_hours)).isoformat()
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT
+                    pair,
+                    COUNT(*) AS closed_trades,
+                    COALESCE(AVG(close_profit), 0.0) AS avg_profit_ratio,
+                    COALESCE(SUM(close_profit), 0.0) AS net_profit_ratio,
+                    COALESCE(SUM(CASE WHEN close_profit > 0 THEN 1 ELSE 0 END), 0) AS wins
+                FROM trades
+                WHERE is_open = 0
+                  AND close_date IS NOT NULL
+                  AND julianday(close_date) >= julianday(?)
+                GROUP BY pair
+                """,
+                (cutoff,),
+            ).fetchall()
+            conn.close()
+        except Exception:
+            return {}
+        result = {}
+        for row in rows:
+            pair = str(row["pair"] or "").strip().upper()
+            if not pair:
+                continue
+            closed = int(row["closed_trades"] or 0)
+            wins = int(row["wins"] or 0)
+            result[pair] = {
+                "closed_trades": float(closed),
+                "win_rate": (wins / closed) if closed > 0 else 0.0,
+                "avg_profit_pct": float(row["avg_profit_ratio"] or 0.0) * 100.0,
+                "net_profit_pct": float(row["net_profit_ratio"] or 0.0) * 100.0,
+            }
+        return result
+
+    def historical_penalty(stats: dict[str, float] | None) -> float:
+        if not stats:
+            return 0.0
+        closed_trades = int(stats.get("closed_trades", 0.0) or 0)
+        if closed_trades < pair_stats_min_trades:
+            return 0.0
+        avg_profit_pct = float(stats.get("avg_profit_pct", 0.0) or 0.0)
+        net_profit_pct = float(stats.get("net_profit_pct", 0.0) or 0.0)
+        win_rate = float(stats.get("win_rate", 0.0) or 0.0)
+        penalty = 0.0
+        if avg_profit_pct < 0.0:
+            penalty += min(1.75, abs(avg_profit_pct) * 1.5)
+        if net_profit_pct < -0.5:
+            penalty += min(1.25, abs(net_profit_pct) * 0.6)
+        if closed_trades >= 3 and win_rate < 0.4:
+            penalty += 0.75
+        return round(min(3.0, penalty), 2)
 
     def pair_to_filename(pair: str, timeframe: str) -> str:
         return f"{pair.replace('/', '_')}-{timeframe}.feather"
@@ -259,6 +393,7 @@ def prepare_candidates(args: argparse.Namespace) -> int:
         "whitelist_missing": [],
         "discovery_notes": discovery_notes,
     }
+    pair_trade_stats = collect_pair_trade_stats(trades_db_target, pair_stats_lookback_hours)
 
     def get_df(pair: str, tf: str, lb: int):
         key = (pair, tf)
@@ -358,6 +493,12 @@ def prepare_candidates(args: argparse.Namespace) -> int:
             },
             trend_4h,
         )
+        trade_stats = pair_trade_stats.get(pair, {})
+        pair_penalty = historical_penalty(trade_stats)
+        if pair_penalty > 0.0:
+            result["discovery_notes"].append(
+                f"historical_penalty:{pair}:{pair_penalty:.2f}:avg={float(trade_stats.get('avg_profit_pct', 0.0)):.2f}%"
+            )
 
         result["candidates"].append(
             {
@@ -376,6 +517,11 @@ def prepare_candidates(args: argparse.Namespace) -> int:
                 "deterministic_score": score,
                 "data_source": source_used,
                 "candidate_sources": sorted(candidate_sources.get(pair, set())),
+                "recent_closed_trades": int(trade_stats.get("closed_trades", 0.0) or 0),
+                "recent_win_rate": float(trade_stats.get("win_rate", 0.0) or 0.0),
+                "recent_avg_profit_pct": float(trade_stats.get("avg_profit_pct", 0.0) or 0.0),
+                "recent_net_profit_pct": float(trade_stats.get("net_profit_pct", 0.0) or 0.0),
+                "historical_penalty": pair_penalty,
             }
         )
     if exchange_fallback_state["used"] > 0:

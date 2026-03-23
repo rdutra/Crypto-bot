@@ -56,12 +56,19 @@ TOKEN_AUDIT_BLOCK_LEVELS="${LLM_ROTATE_TOKEN_AUDIT_BLOCK_LEVELS:-}"
 TOKEN_AUDIT_FAIL_OPEN="${LLM_ROTATE_TOKEN_AUDIT_FAIL_OPEN:-}"
 EXCLUDED_BASES="${LLM_ROTATE_EXCLUDED_BASES:-}"
 EXCLUDED_PAIRS="${LLM_ROTATE_EXCLUDED_PAIRS:-}"
+PROBATION_PATH="${LLM_ROTATE_PROBATION_PATH:-${ROOT_DIR}/freqtrade/user_data/logs/rotation-pair-probation.json}"
+PROBATION_HOURS="${LLM_ROTATE_PROBATION_HOURS:-72}"
 MIN_ATR_PCT="${LLM_ROTATE_MIN_ATR_PCT:-}"
 MIN_ATR_PCT_AGGRESSIVE="${LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE:-}"
 ACTIVE_MIN_ATR_PCT=""
 ROTATION_OUTCOME_DB_PATH="${LLM_ROTATE_OUTCOME_DB_URL:-${LLM_ROTATE_OUTCOME_DB_PATH:-}}"
 ROTATION_OUTCOME_HORIZON_MINUTES="${LLM_ROTATE_OUTCOME_HORIZON_MINUTES:-}"
 ROTATION_OUTCOME_SUCCESS_PCT="${LLM_ROTATE_OUTCOME_SUCCESS_PCT:-}"
+SMART_MONEY_BOT_API_TIMEOUT_SECONDS="${LLM_ROTATE_SMART_MONEY_BOT_API_TIMEOUT_SECONDS:-${LLM_TRADING_SIGNAL_TIMEOUT_SECONDS:-10}}"
+SMART_MONEY_EXCHANGE_TIMEOUT_SECONDS="${LLM_ROTATE_SMART_MONEY_EXCHANGE_TIMEOUT_SECONDS:-10}"
+TOKEN_INFO_HTTP_TIMEOUT_SECONDS="${LLM_ROTATE_TOKEN_INFO_HTTP_TIMEOUT_SECONDS:-${LLM_TOKEN_INFO_TIMEOUT_SECONDS:-4}}"
+TOKEN_AUDIT_HTTP_TIMEOUT_SECONDS="${LLM_ROTATE_TOKEN_AUDIT_HTTP_TIMEOUT_SECONDS:-${LLM_TOKEN_AUDIT_TIMEOUT_SECONDS:-4}}"
+RANK_HTTP_TIMEOUT_SECONDS="${LLM_ROTATE_RANK_HTTP_TIMEOUT_SECONDS:-60}"
 MODE="${STRATEGY_MODE:-conservative}"
 APPLY=false
 RESTART=false
@@ -111,6 +118,7 @@ Notes:
   - Optional: set LLM_ROTATE_SOURCE_DIVERSITY_ENABLED=true to reserve selected slots for Binance-skill, algo, and spike sources.
   - Optional: set LLM_ROTATE_MIN_ATR_PCT / LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE to reject low-volatility pairs before ranking.
   - Optional: set LLM_ROTATE_EXCLUDED_PAIRS to hard-block specific symbols before ranking.
+  - Optional: set LLM_ROTATE_PROBATION_PATH / LLM_ROTATE_PROBATION_HOURS for temporary cooldown blocks with auto-expiry.
   - Optional: set LLM_ROTATE_OUTCOME_DB_PATH to track ranked-pair outcomes independently from executed trades.
 EOF
 }
@@ -125,6 +133,18 @@ is_true() {
     1|true|yes|on) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+can_use_python_db_target() {
+  local db_target="$1"
+  if [[ "${db_target}" != *"://"* ]]; then
+    return 0
+  fi
+  python3 - <<'PY' >/dev/null 2>&1
+import importlib.util
+import sys
+sys.exit(0 if importlib.util.find_spec("psycopg2") else 1)
+PY
 }
 
 apply_rotation_profile_defaults() {
@@ -236,6 +256,8 @@ smart_money_bias_candidates() {
     --quote-asset "${quote_asset}"
     --top-n "${top_n}"
     --min-score "${min_score}"
+    --bot-api-timeout-seconds "${SMART_MONEY_BOT_API_TIMEOUT_SECONDS}"
+    --exchange-timeout-seconds "${SMART_MONEY_EXCHANGE_TIMEOUT_SECONDS}"
     --exclude-regex "${exclude_regex}"
   )
   if is_true "${require_buy}"; then
@@ -267,6 +289,8 @@ apply_skill_prefilters() {
     --min-holders "${min_holders}"
     --max-top10-share "${max_top10_share}"
     --token-audit-block-levels "${token_audit_block_levels}"
+    --token-info-timeout-seconds "${TOKEN_INFO_HTTP_TIMEOUT_SECONDS}"
+    --token-audit-timeout-seconds "${TOKEN_AUDIT_HTTP_TIMEOUT_SECONDS}"
   )
   if is_true "${use_token_info}"; then
     args+=(--use-token-info)
@@ -432,7 +456,7 @@ fi
 freqtrade_strategy="${freqtrade_strategy:-LlmTrendPullbackStrategy}"
 
 if [[ -z "${ALLOWED_REGIMES}" ]]; then
-  if [[ "${freqtrade_strategy}" == "LlmRotationAlignedStrategy" || "${MODE}" == "aggressive" ]]; then
+  if [[ "${freqtrade_strategy}" == "LlmRotationAlignedStrategy" || "${freqtrade_strategy}" == "LlmHybridStrategy" || "${MODE}" == "aggressive" ]]; then
     ALLOWED_REGIMES="trend_pullback breakout mean_reversion"
   else
     ALLOWED_REGIMES="trend_pullback"
@@ -440,7 +464,7 @@ if [[ -z "${ALLOWED_REGIMES}" ]]; then
 fi
 
 if [[ -z "${ALLOWED_RISK}" ]]; then
-  if [[ "${freqtrade_strategy}" == "LlmRotationAlignedStrategy" && "${MODE}" == "aggressive" ]]; then
+  if [[ ("${freqtrade_strategy}" == "LlmRotationAlignedStrategy" || "${freqtrade_strategy}" == "LlmHybridStrategy") && "${MODE}" == "aggressive" ]]; then
     ALLOWED_RISK="low medium high"
   else
     ALLOWED_RISK="low medium"
@@ -566,6 +590,15 @@ fi
 if [[ -z "${EXCLUDED_BASES}" ]]; then
   EXCLUDED_BASES="$(get_env_file_value LLM_ROTATE_EXCLUDED_BASES || true)"
 fi
+if [[ -z "${EXCLUDED_PAIRS}" ]]; then
+  EXCLUDED_PAIRS="$(get_env_file_value LLM_ROTATE_EXCLUDED_PAIRS || true)"
+fi
+if [[ -z "${PROBATION_PATH}" ]]; then
+  PROBATION_PATH="$(get_env_file_value LLM_ROTATE_PROBATION_PATH || true)"
+fi
+if [[ -z "${PROBATION_HOURS}" ]]; then
+  PROBATION_HOURS="$(get_env_file_value LLM_ROTATE_PROBATION_HOURS || true)"
+fi
 if [[ -z "${MIN_ATR_PCT}" ]]; then
   MIN_ATR_PCT="$(get_env_file_value LLM_ROTATE_MIN_ATR_PCT || true)"
 fi
@@ -677,6 +710,10 @@ if ! [[ "${MIN_ATR_PCT_AGGRESSIVE}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   echo "LLM_ROTATE_MIN_ATR_PCT_AGGRESSIVE must be numeric." >&2
   exit 1
 fi
+if ! [[ "${PROBATION_HOURS}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "LLM_ROTATE_PROBATION_HOURS must be numeric." >&2
+  exit 1
+fi
 if ! [[ "${ROTATION_OUTCOME_HORIZON_MINUTES}" =~ ^[0-9]+$ ]]; then
   echo "LLM_ROTATE_OUTCOME_HORIZON_MINUTES must be an integer." >&2
   exit 1
@@ -714,8 +751,20 @@ fi
 if [[ "${ROTATION_OUTCOME_DB_PATH}" != *"://"* && "${ROTATION_OUTCOME_DB_PATH}" != /* ]]; then
   ROTATION_OUTCOME_DB_PATH="${ROOT_DIR}/${ROTATION_OUTCOME_DB_PATH#./}"
 fi
+if [[ "${PROBATION_PATH}" != /* ]]; then
+  PROBATION_PATH="${ROOT_DIR}/${PROBATION_PATH#./}"
+fi
 
 mkdir -p "$(dirname "${LOG_PATH}")"
+
+active_probation_pairs="$(
+  python3 "${ROTATE_HELPER}" probation-active-pairs --state-path "${PROBATION_PATH}"
+)"
+effective_excluded_pairs="${EXCLUDED_PAIRS} ${active_probation_pairs}"
+effective_excluded_pairs="$(printf '%s' "${effective_excluded_pairs}" | xargs 2>/dev/null || true)"
+if [[ -n "${active_probation_pairs}" ]]; then
+  echo "Active probation pairs: ${active_probation_pairs}"
+fi
 
 SPIKE_BIAS_CANDIDATES=""
 if is_true "${USE_SPIKE_BIAS}"; then
@@ -789,10 +838,12 @@ metrics_json="$(
     -e ROTATE_WHITELIST_ONLY="${WHITELIST_ONLY}"
     -e ROTATE_CORE_PAIRS="${core_pairs}"
     -e ROTATE_EXCLUDED_BASES="${EXCLUDED_BASES}"
-    -e ROTATE_EXCLUDED_PAIRS="${EXCLUDED_PAIRS}"
+    -e ROTATE_EXCLUDED_PAIRS="${effective_excluded_pairs}"
     -e ROTATE_MIN_ATR_PCT="${ACTIVE_MIN_ATR_PCT}"
     -e ROTATE_TIMEFRAME="${TIMEFRAME}"
     -e ROTATE_LOOKBACK_CANDLES="${LOOKBACK_CANDLES}"
+    -e ROTATE_MAX_EXCHANGE_FALLBACKS="${MAX_EXCHANGE_FALLBACKS}"
+    -e ROTATE_EXCHANGE_TIMEOUT_MS="${EXCHANGE_TIMEOUT_MS}"
     -e ROTATE_CONFIG_PATH="/freqtrade/user_data/config.json"
     freqtrade
     python
@@ -809,7 +860,7 @@ metrics_json="$(
     --rotate-exclude-regex "${EXCLUDE_REGEX}"
     --rotate-core-pairs "${core_pairs}"
     --rotate-excluded-bases "${EXCLUDED_BASES}"
-    --rotate-excluded-pairs "${EXCLUDED_PAIRS}"
+    --rotate-excluded-pairs "${effective_excluded_pairs}"
     --rotate-min-atr-pct "${ACTIVE_MIN_ATR_PCT}"
     --rotate-timeframe "${TIMEFRAME}"
     --rotate-lookback-candles "${LOOKBACK_CANDLES}"
@@ -824,6 +875,7 @@ metrics_json="$(
   "${prepare_cmd[@]}"
 )"
 
+echo "Applying skill prefilters..."
 metrics_json="$(
   apply_skill_prefilters \
     "${BOT_API_URL}" \
@@ -839,18 +891,29 @@ metrics_json="$(
     "${TOKEN_AUDIT_FAIL_OPEN}"
 )"
 
+metrics_json="$(
+  python3 "${ROTATE_HELPER}" apply-probation-to-metrics \
+    --state-path "${PROBATION_PATH}" \
+    --metrics-json "${metrics_json}" \
+    --hours "${PROBATION_HOURS}"
+)"
+
 current_prices_json="$(
   python3 "${ROTATE_HELPER}" current-prices-json --metrics-json "${metrics_json}"
 )"
 
-python3 "${ROOT_DIR}/scripts/rotation_outcomes.py" \
-  resolve \
-  --db-path "${ROTATION_OUTCOME_DB_PATH}" \
-  --exchange "${EXCHANGE_ID}" \
-  --rest-base-url "${BINANCE_REST_BASE_URL}" \
-  --success-pct "${ROTATION_OUTCOME_SUCCESS_PCT}" \
-  --limit 200 \
-  --current-prices-json "${current_prices_json}" >/dev/null || true
+if can_use_python_db_target "${ROTATION_OUTCOME_DB_PATH}"; then
+  python3 "${ROOT_DIR}/scripts/rotation_outcomes.py" \
+    resolve \
+    --db-path "${ROTATION_OUTCOME_DB_PATH}" \
+    --exchange "${EXCHANGE_ID}" \
+    --rest-base-url "${BINANCE_REST_BASE_URL}" \
+    --success-pct "${ROTATION_OUTCOME_SUCCESS_PCT}" \
+    --limit 200 \
+    --current-prices-json "${current_prices_json}" >/dev/null || true
+else
+  echo "Skipping rotation outcome resolve: local python is missing psycopg2 for Postgres target."
+fi
 
 candidate_count="$(
   python3 "${ROTATE_HELPER}" candidate-count --metrics-json "${metrics_json}"
@@ -886,8 +949,9 @@ rank_request="$(
     --allowed-regimes "${ALLOWED_REGIMES}"
 )"
 
+echo "Ranking candidates..."
 rank_response="$(
-  curl -fsS -X POST "${BOT_API_URL%/}/rank-pairs" \
+  curl --max-time "${RANK_HTTP_TIMEOUT_SECONDS}" -fsS -X POST "${BOT_API_URL%/}/rank-pairs" \
     -H "Content-Type: application/json" \
     -d "${rank_request}"
 )"
@@ -967,11 +1031,15 @@ selected_spike_pairs="$(
     --source spike
 )"
 printf '%s\n' "${rotation_entry_json}" >> "${LOG_PATH}"
-python3 "${ROOT_DIR}/scripts/rotation_outcomes.py" \
-  record \
-  --db-path "${ROTATION_OUTCOME_DB_PATH}" \
-  --horizon-minutes "${ROTATION_OUTCOME_HORIZON_MINUTES}" \
-  --event-json "${rotation_entry_json}" >/dev/null || true
+if can_use_python_db_target "${ROTATION_OUTCOME_DB_PATH}"; then
+  python3 "${ROOT_DIR}/scripts/rotation_outcomes.py" \
+    record \
+    --db-path "${ROTATION_OUTCOME_DB_PATH}" \
+    --horizon-minutes "${ROTATION_OUTCOME_HORIZON_MINUTES}" \
+    --event-json "${rotation_entry_json}" >/dev/null || true
+else
+  echo "Skipping rotation outcome record: local python is missing psycopg2 for Postgres target."
+fi
 echo "Rotation log appended: ${LOG_PATH}"
 
 if [[ -z "${selected_pairs}" ]]; then

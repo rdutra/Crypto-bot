@@ -81,7 +81,7 @@ def smart_money_bias_candidates(args: argparse.Namespace) -> int:
     )
     skill_url = f"{args.bot_api_url.rstrip('/')}/skills/trading-signal?{query}"
     try:
-        payload = fetch_json(skill_url, timeout=15.0)
+        payload = fetch_json(skill_url, timeout=max(1.0, float(args.bot_api_timeout_seconds)))
     except Exception:
         print("")
         return 0
@@ -92,7 +92,10 @@ def smart_money_bias_candidates(args: argparse.Namespace) -> int:
         return 0
 
     try:
-        exchange_info = fetch_json(f"{args.binance_rest_base.rstrip('/')}/api/v3/exchangeInfo", timeout=20.0)
+        exchange_info = fetch_json(
+            f"{args.binance_rest_base.rstrip('/')}/api/v3/exchangeInfo",
+            timeout=max(1.0, float(args.exchange_timeout_seconds)),
+        )
     except Exception:
         print("")
         return 0

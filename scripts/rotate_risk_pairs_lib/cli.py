@@ -19,6 +19,7 @@ from .reporting import (
     selected_source_pairs,
 )
 from .state import risk_changed, set_env_value, sync_whitelist
+from .state import apply_probation_to_metrics, probation_active_pairs, probation_add
 
 
 def _add_shared_metrics_args(parser: argparse.ArgumentParser) -> None:
@@ -47,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     smart.add_argument("--require-buy", action="store_true")
     smart.add_argument("--force-refresh", action="store_true")
     smart.add_argument("--exclude-regex", default="")
+    smart.add_argument("--bot-api-timeout-seconds", type=float, default=10.0)
+    smart.add_argument("--exchange-timeout-seconds", type=float, default=10.0)
 
     prefilter = subparsers.add_parser("apply-skill-prefilters")
     prefilter.add_argument("--bot-api-url", required=True)
@@ -60,6 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     prefilter.add_argument("--use-token-audit", action="store_true")
     prefilter.add_argument("--token-audit-block-levels", default="")
     prefilter.add_argument("--token-audit-fail-open", action="store_true")
+    prefilter.add_argument("--token-info-timeout-seconds", type=float, default=4.0)
+    prefilter.add_argument("--token-audit-timeout-seconds", type=float, default=4.0)
 
     prepare = subparsers.add_parser("prepare-candidates")
     prepare.add_argument("--rotate-candidates", default="")
@@ -164,6 +169,20 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--core-pairs", required=True)
     sync.add_argument("--selected-pairs", required=True)
 
+    probation_active = subparsers.add_parser("probation-active-pairs")
+    probation_active.add_argument("--state-path", type=Path, required=True)
+
+    probation_add_parser = subparsers.add_parser("probation-add")
+    probation_add_parser.add_argument("--state-path", type=Path, required=True)
+    probation_add_parser.add_argument("--pairs", required=True)
+    probation_add_parser.add_argument("--hours", type=float, required=True)
+    probation_add_parser.add_argument("--reason", default="")
+
+    probation_metrics = subparsers.add_parser("apply-probation-to-metrics")
+    probation_metrics.add_argument("--state-path", type=Path, required=True)
+    probation_metrics.add_argument("--metrics-json", required=True)
+    probation_metrics.add_argument("--hours", type=float, required=True)
+
     return parser
 
 
@@ -188,5 +207,8 @@ def main() -> int:
         "risk-changed": risk_changed,
         "set-env-value": set_env_value,
         "sync-whitelist": sync_whitelist,
+        "probation-active-pairs": probation_active_pairs,
+        "probation-add": probation_add,
+        "apply-probation-to-metrics": apply_probation_to_metrics,
     }
     return handlers[args.command](args)

@@ -38,7 +38,10 @@ def apply_skill_prefilters(args: argparse.Namespace) -> int:
         if args.use_token_info:
             params = {"symbol": base, "quote": pair.split("/", 1)[1]}
             try:
-                info_payload = fetch_json(f"{args.bot_api_url.rstrip('/')}/skills/query-token-info?{urlencode(params)}")
+                info_payload = fetch_json(
+                    f"{args.bot_api_url.rstrip('/')}/skills/query-token-info?{urlencode(params)}",
+                    timeout=max(1.0, float(args.token_info_timeout_seconds)),
+                )
                 info_items = info_payload.get("items", []) if isinstance(info_payload, dict) else []
                 info_items = [item for item in info_items if isinstance(item, dict)]
                 info_item = _choose_info_item(info_items)
@@ -67,7 +70,10 @@ def apply_skill_prefilters(args: argparse.Namespace) -> int:
         if args.use_token_audit and not reject_reasons:
             params = {"symbol": base}
             try:
-                audit_payload = fetch_json(f"{args.bot_api_url.rstrip('/')}/skills/query-token-audit?{urlencode(params)}")
+                audit_payload = fetch_json(
+                    f"{args.bot_api_url.rstrip('/')}/skills/query-token-audit?{urlencode(params)}",
+                    timeout=max(1.0, float(args.token_audit_timeout_seconds)),
+                )
                 classification = str(audit_payload.get("classification", "")).strip().lower()
                 if classification and classification in token_audit_block_levels:
                     reject_reasons.append(f"audit_blocked:{classification}")
