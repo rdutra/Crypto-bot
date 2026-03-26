@@ -521,6 +521,127 @@ class RankPairsBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.selected_pairs, ["WLD/USDT"])
 
+    async def test_rank_pairs_caps_non_spike_high_risk_mean_reversion_selections(self) -> None:
+        req = bot_main.RankPairsRequest(
+            candidates=[
+                bot_main.PairCandidate(
+                    pair="CAKE/USDT",
+                    timeframe="1h",
+                    price=2.0,
+                    ema_20=1.98,
+                    ema_50=1.95,
+                    ema_200=1.8,
+                    rsi_14=58.0,
+                    adx_14=18.0,
+                    atr_pct=2.1,
+                    volume_zscore=0.8,
+                    trend_4h="mixed",
+                    market_structure="mixed",
+                    deterministic_score=9.6,
+                ),
+                bot_main.PairCandidate(
+                    pair="AVAX/USDT",
+                    timeframe="1h",
+                    price=10.0,
+                    ema_20=9.8,
+                    ema_50=9.6,
+                    ema_200=9.0,
+                    rsi_14=57.0,
+                    adx_14=20.0,
+                    atr_pct=2.4,
+                    volume_zscore=0.6,
+                    trend_4h="mixed",
+                    market_structure="mixed",
+                    deterministic_score=9.2,
+                ),
+                bot_main.PairCandidate(
+                    pair="SUI/USDT",
+                    timeframe="1h",
+                    price=1.1,
+                    ema_20=1.08,
+                    ema_50=1.04,
+                    ema_200=0.98,
+                    rsi_14=56.0,
+                    adx_14=19.0,
+                    atr_pct=2.0,
+                    volume_zscore=0.5,
+                    trend_4h="mixed",
+                    market_structure="mixed",
+                    deterministic_score=8.8,
+                ),
+                bot_main.PairCandidate(
+                    pair="WLD/USDT",
+                    timeframe="1h",
+                    price=1.0,
+                    ema_20=0.98,
+                    ema_50=0.97,
+                    ema_200=0.9,
+                    rsi_14=60.0,
+                    adx_14=20.0,
+                    atr_pct=3.2,
+                    volume_zscore=1.1,
+                    trend_4h="mixed",
+                    market_structure="mixed",
+                    deterministic_score=8.0,
+                    candidate_sources=["spike"],
+                ),
+            ],
+            allowed_risk_levels=["low", "medium", "high"],
+            allowed_regimes=["trend_pullback", "breakout", "mean_reversion"],
+            min_confidence=0.60,
+            top_n=4,
+        )
+
+        async def fake_run_llm(_: str) -> str:
+            return json.dumps(
+                {
+                    "decisions": [
+                        {
+                            "pair": "CAKE/USDT",
+                            "regime": "mean_reversion",
+                            "risk_level": "high",
+                            "confidence": 0.94,
+                            "note": "reversion",
+                        },
+                        {
+                            "pair": "AVAX/USDT",
+                            "regime": "mean_reversion",
+                            "risk_level": "high",
+                            "confidence": 0.95,
+                            "note": "reversion",
+                        },
+                        {
+                            "pair": "SUI/USDT",
+                            "regime": "mean_reversion",
+                            "risk_level": "high",
+                            "confidence": 0.96,
+                            "note": "reversion",
+                        },
+                        {
+                            "pair": "WLD/USDT",
+                            "regime": "mean_reversion",
+                            "risk_level": "high",
+                            "confidence": 0.88,
+                            "note": "spike reversion",
+                        },
+                    ]
+                }
+            )
+
+        original_run_llm = bot_main._run_llm
+        try:
+            bot_main._run_llm = fake_run_llm
+            response = await bot_main.rank_pairs(req)
+        finally:
+            bot_main._run_llm = original_run_llm
+
+        self.assertEqual(len(response.selected_pairs), 3)
+        self.assertIn("WLD/USDT", response.selected_pairs)
+        self.assertEqual(
+            len([pair for pair in response.selected_pairs if pair in {"CAKE/USDT", "AVAX/USDT", "SUI/USDT"}]),
+            2,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

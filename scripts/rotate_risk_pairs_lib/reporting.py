@@ -26,6 +26,61 @@ def candidate_count(args: argparse.Namespace) -> int:
     return 0
 
 
+def trim_metrics_for_ranking(args: argparse.Namespace) -> int:
+    payload = json.loads(args.metrics_json)
+    candidates = payload.get("candidates", [])
+    if not isinstance(candidates, list):
+        candidates = []
+
+    max_candidates = max(1, int(args.max_candidates))
+    if len(candidates) <= max_candidates:
+        print(json.dumps(payload, separators=(",", ":")))
+        return 0
+
+    def candidate_sources(item: dict) -> set[str]:
+        return {str(x).strip().lower() for x in item.get("candidate_sources", []) if str(x).strip()}
+
+    def sort_key(item: dict) -> tuple[float, float, str]:
+        return (
+            float(item.get("deterministic_score") or 0.0),
+            float(item.get("atr_pct") or 0.0),
+            str(item.get("pair", "")).upper(),
+        )
+
+    ordered = sorted(candidates, key=sort_key, reverse=True)
+    selected: list[dict] = []
+    seen: set[str] = set()
+
+    if args.preserve_source_diversity:
+        for source_name in ("binance_skill", "algo", "spike"):
+            for item in ordered:
+                pair = str(item.get("pair", "")).strip().upper()
+                if not pair or pair in seen:
+                    continue
+                if source_name not in candidate_sources(item):
+                    continue
+                selected.append(item)
+                seen.add(pair)
+                break
+
+    for item in ordered:
+        if len(selected) >= max_candidates:
+            break
+        pair = str(item.get("pair", "")).strip().upper()
+        if not pair or pair in seen:
+            continue
+        selected.append(item)
+        seen.add(pair)
+
+    trimmed = dict(payload)
+    trimmed["candidates"] = selected
+    discovery_notes = list(trimmed.get("discovery_notes", []))
+    discovery_notes.append(f"rank_trimmed:{len(candidates)}->{len(selected)}")
+    trimmed["discovery_notes"] = discovery_notes
+    print(json.dumps(trimmed, separators=(",", ":")))
+    return 0
+
+
 
 def print_metrics_summary(args: argparse.Namespace) -> int:
     payload = json.loads(args.metrics_json)
@@ -88,6 +143,92 @@ def build_rank_request(args: argparse.Namespace) -> int:
         "allowed_regimes": [item.strip().lower() for item in args.allowed_regimes.replace(",", " ").split() if item.strip()] or ["trend_pullback"],
     }
     print(json.dumps(body, separators=(",", ":")))
+    return 0
+
+
+def build_timeout_fallback_rank_response(args: argparse.Namespace) -> int:
+    payload = json.loads(args.metrics_json)
+    candidates = payload.get("candidates", [])
+    if not isinstance(candidates, list):
+        candidates = []
+
+    allowed_risk = {item.strip().lower() for item in args.allowed_risk.replace(",", " ").split() if item.strip()}
+    allowed_regimes = {item.strip().lower() for item in args.allowed_regimes.replace(",", " ").split() if item.strip()}
+    selected: list[str] = []
+    decisions: list[dict] = []
+
+    def sources_of(item: dict) -> set[str]:
+        return {str(x).strip().lower() for x in item.get("candidate_sources", []) if str(x).strip()}
+
+    ordered = sorted(
+        candidates,
+        key=lambda item: (
+            float(item.get("deterministic_score") or 0.0),
+            float(item.get("atr_pct") or 0.0),
+        ),
+        reverse=True,
+    )
+
+    for item in ordered:
+        pair = str(item.get("pair", "")).strip().upper()
+        deterministic_score = float(item.get("deterministic_score") or 0.0)
+        srcs = sources_of(item)
+        if deterministic_score >= 7.0:
+            regime = "trend_pullback"
+            risk_level = "medium"
+            confidence = min(0.92, max(0.62, deterministic_score / 10.0))
+        elif deterministic_score >= 5.0:
+            regime = "mean_reversion"
+            risk_level = "high"
+            confidence = min(0.88 if "spike" in srcs else 0.86, max(0.55, deterministic_score / 10.0))
+        else:
+            regime = "no_trade"
+            risk_level = "high"
+            confidence = min(0.70, max(0.40, deterministic_score / 10.0))
+
+        final_score = deterministic_score + (confidence * 2.5)
+        decisions.append(
+            {
+                "pair": pair,
+                "regime": regime,
+                "risk_level": risk_level,
+                "confidence": confidence,
+                "note": "rank_timeout_det_fallback",
+                "deterministic_score": deterministic_score,
+                "market_rank_score": 0.0,
+                "trading_signal_side": "neutral",
+                "trading_signal_score": 0.0,
+                "final_score": final_score,
+            }
+        )
+
+    for item in decisions:
+        if len(selected) >= args.top_n:
+            break
+        if (
+            item["regime"] in allowed_regimes
+            and item["risk_level"] in allowed_risk
+            and float(item["confidence"]) >= float(args.min_confidence)
+        ):
+            selected.append(str(item["pair"]))
+
+    response = {
+        "selected_pairs": selected,
+        "decisions": decisions,
+        "source": "fallback",
+        "reason": "rank_timeout_det_fallback",
+        "market_rank_source": None,
+        "market_rank_errors": ["rank_timeout"],
+        "market_rank_provider": None,
+        "market_rank_upstream_source": None,
+        "market_rank_upstream_errors": [],
+        "trading_signal_source": None,
+        "trading_signal_errors": ["rank_timeout"],
+        "trading_signal_provider": None,
+        "trading_signal_upstream_source": None,
+        "trading_signal_upstream_errors": [],
+    }
+    print(json.dumps(response, separators=(",", ":")))
     return 0
 
 

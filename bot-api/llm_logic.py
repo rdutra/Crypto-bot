@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, Dict, List
 
@@ -189,6 +190,7 @@ def build_rank_prompt(
 
 def build_policy_prompt(req: Any) -> str:
     payload = req.model_dump()
+    min_closed_trades = max(0, int(os.getenv("LLM_POLICY_MIN_CLOSED_TRADES", "4") or "4"))
     return (
         "You are a risk controller for an automated crypto trading bot.\n"
         "Return only valid JSON with this exact schema:\n"
@@ -196,6 +198,7 @@ def build_policy_prompt(req: Any) -> str:
         '"aggr_entry_strictness":"strict|normal","risk_stake_multiplier":0.55,"risk_max_open_trades":2}\n'
         "Rules:\n"
         "- Keep confidence between 0 and 1.\n"
+        f"- Do not use defensive unless closed_trades is at least {min_closed_trades}.\n"
         "- Use defensive when recent performance is weak or unstable.\n"
         "- Use defensive when the recent rotation funnel is weak: few viable candidates, low selected confidence, or high prefilter rejection.\n"
         "- Use offensive only when both recent performance and recent rotation quality are strong.\n"

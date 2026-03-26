@@ -72,6 +72,8 @@ SMART_MONEY_EXCHANGE_TIMEOUT_SECONDS="${LLM_ROTATE_SMART_MONEY_EXCHANGE_TIMEOUT_
 TOKEN_INFO_HTTP_TIMEOUT_SECONDS="${LLM_ROTATE_TOKEN_INFO_HTTP_TIMEOUT_SECONDS:-${LLM_TOKEN_INFO_TIMEOUT_SECONDS:-4}}"
 TOKEN_AUDIT_HTTP_TIMEOUT_SECONDS="${LLM_ROTATE_TOKEN_AUDIT_HTTP_TIMEOUT_SECONDS:-${LLM_TOKEN_AUDIT_TIMEOUT_SECONDS:-4}}"
 RANK_HTTP_TIMEOUT_SECONDS="${LLM_ROTATE_RANK_HTTP_TIMEOUT_SECONDS:-90}"
+RANK_MAX_CANDIDATES="${LLM_ROTATE_RANK_MAX_CANDIDATES:-8}"
+RANK_RETRY_MAX_CANDIDATES="${LLM_ROTATE_RANK_RETRY_MAX_CANDIDATES:-6}"
 MODE="${STRATEGY_MODE:-conservative}"
 APPLY=false
 RESTART=false
@@ -172,7 +174,7 @@ apply_rotation_profile_defaults() {
       USE_TOKEN_INFO_PREFILTER="${USE_TOKEN_INFO_PREFILTER:-true}"
       USE_TOKEN_AUDIT_PREFILTER="${USE_TOKEN_AUDIT_PREFILTER:-true}"
       MIN_ATR_PCT_AGGRESSIVE="${MIN_ATR_PCT_AGGRESSIVE:-0.50}"
-      MAX_EXCHANGE_FALLBACKS="${MAX_EXCHANGE_FALLBACKS:-8}"
+      MAX_EXCHANGE_FALLBACKS="${MAX_EXCHANGE_FALLBACKS:-6}"
       EXCHANGE_TIMEOUT_MS="${EXCHANGE_TIMEOUT_MS:-7000}"
       ;;
     expansive)
@@ -194,7 +196,7 @@ apply_rotation_profile_defaults() {
       USE_TOKEN_INFO_PREFILTER="${USE_TOKEN_INFO_PREFILTER:-true}"
       USE_TOKEN_AUDIT_PREFILTER="${USE_TOKEN_AUDIT_PREFILTER:-true}"
       MIN_ATR_PCT_AGGRESSIVE="${MIN_ATR_PCT_AGGRESSIVE:-0.30}"
-      MAX_EXCHANGE_FALLBACKS="${MAX_EXCHANGE_FALLBACKS:-14}"
+      MAX_EXCHANGE_FALLBACKS="${MAX_EXCHANGE_FALLBACKS:-8}"
       EXCHANGE_TIMEOUT_MS="${EXCHANGE_TIMEOUT_MS:-9000}"
       ;;
     *)
@@ -216,7 +218,7 @@ apply_rotation_profile_defaults() {
       USE_TOKEN_INFO_PREFILTER="${USE_TOKEN_INFO_PREFILTER:-true}"
       USE_TOKEN_AUDIT_PREFILTER="${USE_TOKEN_AUDIT_PREFILTER:-true}"
       MIN_ATR_PCT_AGGRESSIVE="${MIN_ATR_PCT_AGGRESSIVE:-0.40}"
-      MAX_EXCHANGE_FALLBACKS="${MAX_EXCHANGE_FALLBACKS:-10}"
+      MAX_EXCHANGE_FALLBACKS="${MAX_EXCHANGE_FALLBACKS:-6}"
       EXCHANGE_TIMEOUT_MS="${EXCHANGE_TIMEOUT_MS:-8000}"
       ;;
   esac
@@ -946,9 +948,16 @@ if [[ "${candidate_count}" -eq 0 ]]; then
   exit 1
 fi
 
+rank_metrics_json="$(
+  python3 "${ROTATE_HELPER}" trim-metrics-for-ranking \
+    --metrics-json "${metrics_json}" \
+    --max-candidates "${RANK_MAX_CANDIDATES}" \
+    --preserve-source-diversity
+)"
+
 rank_request="$(
   python3 "${ROTATE_HELPER}" build-rank-request \
-    --metrics-json "${metrics_json}" \
+    --metrics-json "${rank_metrics_json}" \
     --top-n "${TOP_N}" \
     --min-confidence "${MIN_CONFIDENCE}" \
     --allowed-risk "${ALLOWED_RISK}" \
@@ -956,15 +965,48 @@ rank_request="$(
 )"
 
 echo "Ranking candidates..."
-rank_response="$(
+if ! rank_response="$(
   curl --max-time "${RANK_HTTP_TIMEOUT_SECONDS}" -fsS -X POST "${BOT_API_URL%/}/rank-pairs" \
     -H "Content-Type: application/json" \
     -d "${rank_request}"
-)"
+)"; then
+  echo "Primary rank request timed out or failed. Retrying with smaller candidate set..."
+  retry_rank_metrics_json="$(
+    python3 "${ROTATE_HELPER}" trim-metrics-for-ranking \
+      --metrics-json "${metrics_json}" \
+      --max-candidates "${RANK_RETRY_MAX_CANDIDATES}" \
+      --preserve-source-diversity
+  )"
+  retry_rank_request="$(
+    python3 "${ROTATE_HELPER}" build-rank-request \
+      --metrics-json "${retry_rank_metrics_json}" \
+      --top-n "${TOP_N}" \
+      --min-confidence "${MIN_CONFIDENCE}" \
+      --allowed-risk "${ALLOWED_RISK}" \
+      --allowed-regimes "${ALLOWED_REGIMES}"
+  )"
+  if ! rank_response="$(
+    curl --max-time "${RANK_HTTP_TIMEOUT_SECONDS}" -fsS -X POST "${BOT_API_URL%/}/rank-pairs" \
+      -H "Content-Type: application/json" \
+      -d "${retry_rank_request}"
+  )"; then
+    echo "Retry rank request failed. Falling back to deterministic timeout ranking."
+    rank_response="$(
+      python3 "${ROTATE_HELPER}" build-timeout-fallback-rank-response \
+        --metrics-json "${retry_rank_metrics_json}" \
+        --top-n "${TOP_N}" \
+        --min-confidence "${MIN_CONFIDENCE}" \
+        --allowed-risk "${ALLOWED_RISK}" \
+        --allowed-regimes "${ALLOWED_REGIMES}"
+    )"
+  else
+    rank_metrics_json="${retry_rank_metrics_json}"
+  fi
+fi
 
 echo ""
 echo "LLM ranking result:"
-python3 "${ROTATE_HELPER}" print-ranking-summary --rank-response "${rank_response}" --metrics-json "${metrics_json}"
+python3 "${ROTATE_HELPER}" print-ranking-summary --rank-response "${rank_response}" --metrics-json "${rank_metrics_json}"
 
 selected_pairs="$(
   python3 "${ROTATE_HELPER}" selected-pairs --rank-response "${rank_response}"

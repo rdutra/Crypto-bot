@@ -107,6 +107,8 @@ class Settings(BaseModel):
     exclude_symbols: str = _env_str("SPIKE_EXCLUDE_SYMBOLS", "BTCUSDT ETHUSDT")
     universe_max_symbols: int = _env_int("SPIKE_UNIVERSE_MAX_SYMBOLS", 120)
     ws_symbols_per_conn: int = _env_int("SPIKE_WS_SYMBOLS_PER_CONN", 25)
+    universe_cache_path: str = _env_str("SPIKE_UNIVERSE_CACHE_PATH", "/data/spike-universe-cache.json")
+    universe_cache_ttl_minutes: int = _env_int("SPIKE_UNIVERSE_CACHE_TTL_MINUTES", 360)
 
     top_n_alerts: int = _env_int("SPIKE_TOP_N_ALERTS", 5)
     min_score: float = _env_float("SPIKE_MIN_SCORE", SPIKE_PROFILE_DEFAULTS[_spike_profile()]["min_score"])

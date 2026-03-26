@@ -1,4 +1,7 @@
 import re
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -12,11 +15,55 @@ async def _fetch_json(session: aiohttp.ClientSession, url: str) -> Any:
         return await resp.json()
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _load_cached_universe_payload(cache_path: str) -> tuple[list[str], datetime | None]:
+    path = Path(cache_path)
+    if not path.exists():
+        return [], None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return [], None
+    fetched_at_raw = str(payload.get("fetched_at", "") or "").strip()
+    symbols = payload.get("symbols", [])
+    if not fetched_at_raw or not isinstance(symbols, list):
+        return [], None
+    try:
+        fetched_at = datetime.fromisoformat(fetched_at_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return [], None
+    if fetched_at.tzinfo is None:
+        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+    else:
+        fetched_at = fetched_at.astimezone(timezone.utc)
+    normalized = [str(symbol).lower() for symbol in symbols if str(symbol).strip()]
+    return normalized, fetched_at
+
+
+def _write_cached_universe(cache_path: str, symbols: list[str]) -> None:
+    path = Path(cache_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"fetched_at": _utc_now().isoformat(), "symbols": [str(symbol).lower() for symbol in symbols if str(symbol).strip()]}
+    path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+
+
 async def load_universe(session: aiohttp.ClientSession, settings: Settings) -> list[str]:
+    cached_symbols, cached_at = _load_cached_universe_payload(settings.universe_cache_path)
+    if cached_symbols and cached_at and cached_at >= (_utc_now() - timedelta(minutes=max(1, int(settings.universe_cache_ttl_minutes)))):
+        return cached_symbols
+
     exchange_url = f"{settings.rest_base}/api/v3/exchangeInfo?permissions=SPOT"
     tickers_url = f"{settings.rest_base}/api/v3/ticker/24hr"
 
-    exchange_info, tickers = await _fetch_json(session, exchange_url), await _fetch_json(session, tickers_url)
+    try:
+        exchange_info, tickers = await _fetch_json(session, exchange_url), await _fetch_json(session, tickers_url)
+    except Exception:
+        if cached_symbols:
+            return cached_symbols
+        raise
 
     quote_volume_map: dict[str, float] = {}
     for t in tickers:
@@ -55,4 +102,5 @@ async def load_universe(session: aiohttp.ClientSession, settings: Settings) -> l
 
     candidates.sort(key=lambda x: x[1], reverse=True)
     selected = [symbol.lower() for symbol, _ in candidates[: settings.universe_max_symbols]]
+    _write_cached_universe(settings.universe_cache_path, selected)
     return selected

@@ -378,6 +378,7 @@ LLM runtime policy loop:
 - `LLM_POLICY_LOOP_ENABLED=true|false`
 - `LLM_POLICY_INTERVAL_MINUTES=15`
 - `LLM_POLICY_LOOKBACK_HOURS=24`
+- `LLM_POLICY_MIN_CLOSED_TRADES=4` minimum recent closed trades before the policy loop may switch to `defensive`
 - `LLM_POLICY_HTTP_TIMEOUT_SECONDS=45`
 - `LLM_POLICY_TRADES_DB=postgresql+psycopg2://stack:stack@stack-postgres:5432/freqtrade`
 - `LLM_POLICY_OUTPUT_PATH=./freqtrade/user_data/logs/llm-runtime-policy.json`

@@ -7,6 +7,7 @@ from .bias import smart_money_bias_candidates, spike_bias_candidates
 from .prefilters import apply_skill_prefilters
 from .prepare import prepare_candidates
 from .reporting import (
+    build_timeout_fallback_rank_response,
     build_rank_request,
     build_rotation_entry,
     candidate_count,
@@ -17,6 +18,7 @@ from .reporting import (
     print_ranking_summary,
     selected_pairs,
     selected_source_pairs,
+    trim_metrics_for_ranking,
 )
 from .state import risk_changed, set_env_value, sync_whitelist
 from .state import apply_probation_to_metrics, probation_active_pairs, probation_add
@@ -93,6 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
     count = subparsers.add_parser("candidate-count")
     _add_shared_metrics_args(count)
 
+    trim_metrics = subparsers.add_parser("trim-metrics-for-ranking")
+    _add_shared_metrics_args(trim_metrics)
+    trim_metrics.add_argument("--max-candidates", type=int, required=True)
+    trim_metrics.add_argument("--preserve-source-diversity", action="store_true")
+
     metrics_summary = subparsers.add_parser("print-metrics-summary")
     _add_shared_metrics_args(metrics_summary)
 
@@ -112,6 +119,13 @@ def build_parser() -> argparse.ArgumentParser:
     rank_request.add_argument("--min-confidence", type=float, required=True)
     rank_request.add_argument("--allowed-risk", required=True)
     rank_request.add_argument("--allowed-regimes", required=True)
+
+    timeout_rank = subparsers.add_parser("build-timeout-fallback-rank-response")
+    _add_shared_metrics_args(timeout_rank)
+    timeout_rank.add_argument("--top-n", type=int, required=True)
+    timeout_rank.add_argument("--min-confidence", type=float, required=True)
+    timeout_rank.add_argument("--allowed-risk", required=True)
+    timeout_rank.add_argument("--allowed-regimes", required=True)
 
     ranking_summary = subparsers.add_parser("print-ranking-summary")
     ranking_summary.add_argument("--rank-response", required=True)
@@ -196,9 +210,11 @@ def main() -> int:
         "prepare-candidates": prepare_candidates,
         "current-prices-json": current_prices_json,
         "candidate-count": candidate_count,
+        "trim-metrics-for-ranking": trim_metrics_for_ranking,
         "print-metrics-summary": print_metrics_summary,
         "log-no-candidates": log_no_candidates,
         "build-rank-request": build_rank_request,
+        "build-timeout-fallback-rank-response": build_timeout_fallback_rank_response,
         "print-ranking-summary": print_ranking_summary,
         "selected-pairs": selected_pairs,
         "selected-source-pairs": selected_source_pairs,

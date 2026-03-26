@@ -76,8 +76,9 @@ MEAN_REVERSION_HIGH_RISK_PENALTY = max(
     0.0, float(os.getenv("LLM_MEAN_REVERSION_HIGH_RISK_PENALTY", "0.6") or "0.6")
 )
 SPIKE_MEAN_REVERSION_PENALTY = max(0.0, float(os.getenv("LLM_SPIKE_MEAN_REVERSION_PENALTY", "0.25") or "0.25"))
-MEAN_REVERSION_HIGH_MIN_CONFIDENCE = 0.90
+MEAN_REVERSION_HIGH_MIN_CONFIDENCE = 0.92
 SPIKE_MEAN_REVERSION_HIGH_MIN_CONFIDENCE = 0.88
+NON_SPIKE_MEAN_REVERSION_HIGH_MAX_SELECTED = 2
 
 LLM_DEBUG_ENABLED = str(os.getenv("LLM_DEBUG_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
 LLM_DEBUG_MAX_ENTRIES = max(20, min(2000, int(os.getenv("LLM_DEBUG_MAX_ENTRIES", "250") or "250")))
@@ -95,6 +96,7 @@ LLM_DEBUG_STORE = LlmDebugStore(
     db_path=LLM_DEBUG_DB_PATH,
     max_rows=LLM_DEBUG_DB_MAX_ROWS,
 )
+LLM_POLICY_MIN_CLOSED_TRADES = max(0, int(os.getenv("LLM_POLICY_MIN_CLOSED_TRADES", "4") or "4"))
 
 
 @app.on_event("shutdown")
@@ -333,6 +335,7 @@ def _rank_response(
         )
 
     ranked.sort(key=lambda item: item.final_score, reverse=True)
+    non_spike_mean_reversion_high_selected = 0
     for item in ranked:
         if len(selected) >= req.top_n:
             break
@@ -345,8 +348,16 @@ def _rank_response(
                 else MEAN_REVERSION_HIGH_MIN_CONFIDENCE
             )
             min_confidence = max(min_confidence, extra_floor)
+            if "spike" not in candidate_sources and non_spike_mean_reversion_high_selected >= NON_SPIKE_MEAN_REVERSION_HIGH_MAX_SELECTED:
+                continue
         if item.regime in allowed_regimes and item.risk_level in allowed_risk and item.confidence >= min_confidence:
             selected.append(item.pair)
+            if (
+                item.regime == "mean_reversion"
+                and item.risk_level == "high"
+                and "spike" not in candidate_sources
+            ):
+                non_spike_mean_reversion_high_selected += 1
 
     return RankPairsResponse(
         selected_pairs=selected,
@@ -499,6 +510,26 @@ def _policy_fallback(req: RuntimePolicyRequest, reason: str) -> RuntimePolicyDec
         risk_max_open_trades=2,
         source="fallback",
         reason=reason,
+    )
+
+
+def _apply_policy_sample_guard(req: RuntimePolicyRequest, decision: RuntimePolicyDecision) -> RuntimePolicyDecision:
+    if decision.profile != "defensive":
+        return decision
+    if req.closed_trades >= LLM_POLICY_MIN_CLOSED_TRADES:
+        return decision
+    return RuntimePolicyDecision(
+        profile="normal",
+        confidence=min(decision.confidence, 0.6),
+        note=(
+            f"sample_guard:normal until {LLM_POLICY_MIN_CLOSED_TRADES} closed trades "
+            f"(have {req.closed_trades})"
+        )[:220],
+        aggr_entry_strictness=decision.aggr_entry_strictness,
+        risk_stake_multiplier=max(decision.risk_stake_multiplier, 0.55),
+        risk_max_open_trades=max(decision.risk_max_open_trades, 2),
+        source=decision.source,
+        reason=decision.reason,
     )
 
 
@@ -831,7 +862,7 @@ async def policy(req: RuntimePolicyRequest) -> RuntimePolicyDecision:
         _record_llm_call(endpoint="policy", prompt=prompt, raw_response=raw_text, parsed_ok=True)
         parsed.source = "llm"
         parsed.reason = "llm_ok"
-        return parsed
+        return _apply_policy_sample_guard(req, parsed)
     except Exception as exc:
         logger.warning("policy fallback: llm_unavailable")
         _record_llm_call(

@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from spike_db import collect_spike_allowed_rate, normalize_postgres_target
 
 LOGGER = logging.getLogger("llm-policy-loop")
+POLICY_MIN_CLOSED_TRADES = max(0, int(os.getenv("LLM_POLICY_MIN_CLOSED_TRADES", "4") or "4"))
 
 
 def _env_bool(key: str, default: bool) -> bool:
@@ -322,7 +323,7 @@ def _local_policy_fallback(payload: dict[str, Any], reason: str) -> dict[str, An
     }
 
 
-def _normalize_policy(raw: dict[str, Any]) -> dict[str, Any]:
+def _normalize_policy(raw: dict[str, Any], closed_trades: int) -> dict[str, Any]:
     profile = str(raw.get("profile", "normal")).strip().lower()
     if profile not in {"defensive", "normal", "offensive"}:
         profile = "normal"
@@ -339,6 +340,16 @@ def _normalize_policy(raw: dict[str, Any]) -> dict[str, Any]:
     if source not in {"llm", "fallback"}:
         source = "fallback"
     reason = str(raw.get("reason", "")).strip()[:120]
+
+    if profile == "defensive" and closed_trades < POLICY_MIN_CLOSED_TRADES:
+        profile = "normal"
+        confidence = min(confidence, 0.60)
+        risk_stake = max(risk_stake, 0.55)
+        risk_open = max(risk_open, 2)
+        note = (
+            f"sample_guard:normal until {POLICY_MIN_CLOSED_TRADES} closed trades "
+            f"(have {closed_trades})"
+        )[:220]
 
     return {
         "profile": profile,
@@ -413,7 +424,7 @@ def _run_once(
     policy = _request_policy(bot_api_url=bot_api_url, payload=payload, timeout_seconds=timeout_seconds)
     if not isinstance(policy, dict):
         policy = _local_policy_fallback(payload, reason="bot_api_unavailable")
-    normalized = _normalize_policy(policy)
+    normalized = _normalize_policy(policy, closed_trades=_safe_int(payload.get("closed_trades"), 0))
     normalized["generated_at"] = _utc_now().isoformat()
     normalized["metrics"] = payload
     _write_policy(output_path, normalized)

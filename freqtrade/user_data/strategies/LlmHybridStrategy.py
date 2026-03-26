@@ -27,6 +27,9 @@ class LlmHybridStrategy(LlmRotationAlignedStrategy):
         value = str(os.getenv(key, default)).strip()
         return value or default
 
+    def _is_core_trend_pair(self, pair: str) -> bool:
+        return self._is_core_pair(pair) and not self._is_risk_pair(pair) and not self._is_spike_pair(pair)
+
     def _spike_entry_thresholds(self) -> Dict[str, float]:
         strict = self._aggr_entry_is_strict()
         return {
@@ -189,6 +192,29 @@ class LlmHybridStrategy(LlmRotationAlignedStrategy):
                 age_hours = (current_time - open_dt).total_seconds() / 3600.0
                 if age_hours >= 16.0 and current_profit < 0.004:
                     return "spike_stale_exit"
+        elif self._is_core_trend_pair(pair):
+            open_dt = getattr(trade, "open_date_utc", None)
+            if open_dt is not None:
+                daily_allow, daily_reason, _ = self._daily_guard_status(current_time)
+                if not daily_allow:
+                    if daily_reason == "daily_loss_limit":
+                        return "daily_loss_cap_exit"
+                    if daily_reason == "daily_target_reached":
+                        return "daily_target_lock_exit"
+
+                age_hours = (current_time - open_dt).total_seconds() / 3600.0
+                max_age_hours = self._stale_max_hours() * 1.5
+                stale_loss_hours = self._stale_loss_hours() * 1.5
+                stale_trade_hours = self._stale_trade_hours() * 1.75
+                stale_loss_pct = self._stale_loss_pct() * 1.25
+                stale_min_profit = self._stale_min_profit() * 0.7
+
+                if age_hours >= max_age_hours and current_profit < 0.025:
+                    return "core_max_age_exit"
+                if age_hours >= stale_loss_hours and current_profit <= stale_loss_pct:
+                    return "core_stale_loss_exit"
+                if age_hours >= stale_trade_hours and current_profit < stale_min_profit:
+                    return "core_stale_trade_exit"
         return super().custom_exit(
             pair=pair,
             trade=trade,
@@ -197,3 +223,35 @@ class LlmHybridStrategy(LlmRotationAlignedStrategy):
             current_profit=current_profit,
             **kwargs,
         )
+
+    def custom_stoploss(
+        self,
+        pair: str,
+        trade,
+        current_time: datetime,
+        current_rate: float,
+        current_profit: float,
+        after_fill: bool,
+        **kwargs,
+    ) -> Optional[float]:
+        stop = super().custom_stoploss(
+            pair=pair,
+            trade=trade,
+            current_time=current_time,
+            current_rate=current_rate,
+            current_profit=current_profit,
+            after_fill=after_fill,
+            **kwargs,
+        )
+        if stop is None or not self._is_core_trend_pair(pair):
+            return stop
+
+        adjusted = float(stop)
+        if current_profit >= 0.04:
+            adjusted -= 0.006
+        elif current_profit >= 0.02:
+            adjusted -= 0.004
+        elif current_profit >= 0.01:
+            adjusted -= 0.002
+
+        return max(-0.2, min(-0.001, adjusted))
