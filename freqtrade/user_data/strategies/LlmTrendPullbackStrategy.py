@@ -377,6 +377,8 @@ class LlmTrendPullbackStrategy(IStrategy):
 
     def _risk_stake_multiplier(self) -> float:
         base = self._float_env("RISK_STAKE_MULTIPLIER", 0.5, 0.1, 1.0)
+        if self._daily_target_defensive_active():
+            base = min(base, self._daily_target_defensive_stake_multiplier())
         policy = self._runtime_policy()
         override = policy.get("risk_stake_multiplier")
         try:
@@ -386,6 +388,8 @@ class LlmTrendPullbackStrategy(IStrategy):
 
     def _risk_max_open_trades(self) -> int:
         base = self._int_env("RISK_MAX_OPEN_TRADES", 1, 1, 5)
+        if self._daily_target_defensive_active():
+            base = min(base, self._daily_target_defensive_max_open_trades())
         policy = self._runtime_policy()
         override = policy.get("risk_max_open_trades")
         try:
@@ -402,20 +406,79 @@ class LlmTrendPullbackStrategy(IStrategy):
     def _daily_max_drawdown_pct(self) -> float:
         return self._float_env("DAILY_MAX_DRAWDOWN_PCT", -1.5, -20.0, -0.1)
 
-    def _daily_pnl_base_capital(self) -> float:
+    def _daily_target_switch_to_defensive(self) -> bool:
+        return _env_bool("DAILY_TARGET_SWITCH_TO_DEFENSIVE", True)
+
+    def _daily_target_defensive_stake_multiplier(self) -> float:
+        return self._float_env("DAILY_TARGET_DEFENSIVE_STAKE_MULTIPLIER", 0.35, 0.1, 1.0)
+
+    def _daily_target_defensive_max_open_trades(self) -> int:
+        return self._int_env("DAILY_TARGET_DEFENSIVE_MAX_OPEN_TRADES", 1, 1, 5)
+
+    def _config_base_capital(self) -> float:
         config = getattr(self, "config", {}) or {}
-        default_base = 0.0
         for key in ("available_capital", "dry_run_wallet"):
             try:
                 value = float(config.get(key, 0.0))
                 if value > 0:
-                    default_base = value
-                    break
+                    return value
             except (TypeError, ValueError):
                 continue
-        if default_base <= 0.0:
-            default_base = 200.0
-        return self._float_env("DAILY_PNL_BASE_CAPITAL", default_base, 20.0, 1000000.0)
+        return 200.0
+
+    def _wallet_total_stake_balance(self) -> Optional[float]:
+        wallets = getattr(self, "wallets", None)
+        if wallets is None:
+            return None
+
+        for method_name in ("get_total_stake_amount", "get_total_stake_balance"):
+            method = getattr(wallets, method_name, None)
+            if callable(method):
+                try:
+                    value = float(method())
+                    if value > 0.0:
+                        return value
+                except Exception:
+                    pass
+
+        config = getattr(self, "config", {}) or {}
+        stake_currency = str(config.get("stake_currency", "")).strip().upper()
+        if stake_currency:
+            for method_name in ("get_total", "get_free"):
+                method = getattr(wallets, method_name, None)
+                if callable(method):
+                    try:
+                        value = float(method(stake_currency))
+                        if value > 0.0:
+                            return value
+                    except Exception:
+                        pass
+
+        return None
+
+    def _daily_pnl_base_mode(self) -> str:
+        value = os.getenv("DAILY_PNL_BASE_MODE", "config").strip().lower()
+        if value not in {"fixed", "config", "equity"}:
+            return "config"
+        return value
+
+    def _daily_pnl_base_capital(self) -> float:
+        config_base = self._config_base_capital()
+        mode = self._daily_pnl_base_mode()
+
+        if mode == "equity":
+            wallet_total = self._wallet_total_stake_balance()
+            if wallet_total is not None and wallet_total > 0.0:
+                return wallet_total
+            return config_base
+
+        if mode == "config":
+            return config_base
+
+        return self._float_env("DAILY_PNL_BASE_CAPITAL", config_base, 20.0, 1000000.0)
+
+    def _stake_total_balance_pct(self) -> float:
+        return self._float_env("STAKE_TOTAL_BALANCE_PCT", 0.0, 0.0, 100.0)
 
     def _as_utc_timestamp(self, value: Optional[datetime]) -> Optional[float]:
         if value is None:
@@ -493,8 +556,12 @@ class LlmTrendPullbackStrategy(IStrategy):
         allow_entries = True
         reason = "ok"
         if realized_pct >= target_pct:
-            allow_entries = False
-            reason = "daily_target_reached"
+            if self._daily_target_switch_to_defensive():
+                allow_entries = True
+                reason = "daily_target_defensive"
+            else:
+                allow_entries = False
+                reason = "daily_target_reached"
         elif realized_pct <= max_drawdown_pct:
             allow_entries = False
             reason = "daily_loss_limit"
@@ -522,6 +589,13 @@ class LlmTrendPullbackStrategy(IStrategy):
 
         return allow_entries, reason, realized_pct
 
+    def _daily_target_defensive_active(self, current_time: Optional[datetime] = None) -> bool:
+        if not self._daily_target_switch_to_defensive():
+            return False
+        probe_time = current_time if isinstance(current_time, datetime) else datetime.now(timezone.utc)
+        allow_entries, reason, _ = self._daily_guard_status(probe_time)
+        return allow_entries and reason == "daily_target_defensive"
+
     def _entry_ranking_enabled(self) -> bool:
         return _env_bool("ENTRY_RANKING_ENABLED", self._is_aggressive())
 
@@ -529,6 +603,9 @@ class LlmTrendPullbackStrategy(IStrategy):
         value = os.getenv("AGGR_ENTRY_STRICTNESS", "strict").strip().lower()
         if value not in {"normal", "strict"}:
             value = "strict"
+
+        if self._daily_target_defensive_active():
+            return "strict"
 
         policy = self._runtime_policy()
         override = str(policy.get("aggr_entry_strictness", "")).strip().lower()
@@ -1410,6 +1487,17 @@ class LlmTrendPullbackStrategy(IStrategy):
         **kwargs,
     ) -> float:
         stake = float(proposed_stake)
+        stake_total_balance_pct = self._stake_total_balance_pct()
+        if stake_total_balance_pct > 0.0:
+            base_capital = self._wallet_total_stake_balance()
+            if base_capital is None or base_capital <= 0.0:
+                base_capital = self._config_base_capital()
+            if base_capital > 0.0:
+                stake = base_capital * (stake_total_balance_pct / 100.0)
+
+        if self._daily_target_defensive_active(current_time):
+            stake *= self._daily_target_defensive_stake_multiplier()
+
         if self._is_risk_pair(pair):
             stake *= self._risk_stake_multiplier()
 

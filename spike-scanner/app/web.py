@@ -2,6 +2,7 @@ import json
 import math
 import os
 import re
+import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -15,6 +16,7 @@ from app.storage import PredictionStore
 ENTRY_DIAG_LINE_RE = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}).*?Entry diag (?P<payload>.+)$")
 ENTRY_DIAG_CACHE: dict[str, object] = {"path": None, "mtime_ns": None, "size": None, "rows": []}
 ROTATION_LOG_CACHE: dict[str, object] = {"path": None, "mtime_ns": None, "size": None, "rows": []}
+DAILY_GUARD_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
 
 
 def _esc(value) -> str:
@@ -37,6 +39,12 @@ def _fmt_num(value, digits: int = 4) -> str:
     if value is None:
         return ""
     return f"{float(value):.{digits}f}"
+
+
+def _fmt_money(value, currency: str = "USDT", digits: int = 2) -> str:
+    if value is None:
+        return ""
+    return f"{float(value):.{digits}f} {currency}"
 
 
 def _normalize_utc_iso(value) -> str:
@@ -243,6 +251,348 @@ def _normalize_postgres_target(target: str) -> str:
 
 def _coin_news_db_target() -> str:
     return str(os.getenv("COIN_NEWS_DB_URL", "")).strip()
+
+
+def _freqtrade_db_target() -> str:
+    value = str(os.getenv("FREQTRADE_DB_URL", "")).strip()
+    if value:
+        return value
+    value = str(os.getenv("LLM_POLICY_TRADES_DB", "")).strip()
+    if value:
+        return value
+    return ""
+
+
+def _freqtrade_api_base_url() -> str:
+    value = str(os.getenv("FREQTRADE_API_URL", "")).strip()
+    if value:
+        return value.rstrip("/")
+    return "http://freqtrade:8080"
+
+
+def _freqtrade_api_auth() -> aiohttp.BasicAuth | None:
+    username = str(os.getenv("FREQTRADE_API_USERNAME", "")).strip()
+    password = str(os.getenv("FREQTRADE_API_PASSWORD", "")).strip()
+    if not username:
+        return None
+    return aiohttp.BasicAuth(login=username, password=password)
+
+
+def _daily_pnl_base_mode() -> str:
+    value = str(os.getenv("DAILY_PNL_BASE_MODE", "config")).strip().lower()
+    if value not in {"fixed", "config", "equity"}:
+        return "config"
+    return value
+
+
+def _daily_target_pct_value() -> float:
+    return _safe_float(os.getenv("DAILY_TARGET_PCT")) or 1.0
+
+
+def _daily_max_drawdown_pct_value() -> float:
+    return _safe_float(os.getenv("DAILY_MAX_DRAWDOWN_PCT")) or -1.5
+
+
+def _daily_pnl_fixed_capital_value() -> float:
+    return _safe_float(os.getenv("DAILY_PNL_BASE_CAPITAL")) or 200.0
+
+
+def _stake_total_balance_pct_value() -> float:
+    return _safe_float(os.getenv("STAKE_TOTAL_BALANCE_PCT")) or 0.0
+
+
+def _daily_target_switch_to_defensive_value() -> bool:
+    return _env_bool("DAILY_TARGET_SWITCH_TO_DEFENSIVE", True)
+
+
+def _daily_guard_capital_from_balance(balance_payload: dict[str, object]) -> float | None:
+    for key in ("total_bot", "total", "starting_capital"):
+        value = _safe_float(str(balance_payload.get(key, "")))
+        if value is not None and value > 0.0:
+            return value
+    return None
+
+
+def _load_daily_realized_trade_stats() -> dict[str, object]:
+    target = _freqtrade_db_target()
+    stats: dict[str, object] = {
+        "realized_abs": 0.0,
+        "closed_trades_today": 0,
+        "db_error": "",
+    }
+    if not target:
+        stats["db_error"] = "freqtrade_db_unset"
+        return stats
+
+    backend = _detect_backend(target)
+    now = datetime.now(timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        if backend == "postgres":
+            import psycopg2
+            import psycopg2.extras
+
+            conn = psycopg2.connect(_normalize_postgres_target(target))
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) AS closed_trades,
+                    COALESCE(SUM(COALESCE(close_profit_abs, stake_amount * close_profit)), 0.0) AS realized_abs
+                FROM trades
+                WHERE is_open = false
+                  AND close_date IS NOT NULL
+                  AND close_date >= %s
+                """,
+                (day_start,),
+            )
+            row = dict(cur.fetchone() or {})
+            cur.close()
+            conn.close()
+        else:
+            import sqlite3
+
+            db_path = target
+            if db_path.startswith("sqlite:///"):
+                db_path = db_path[len("sqlite:///") :]
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            row = dict(
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS closed_trades,
+                        COALESCE(SUM(COALESCE(close_profit_abs, stake_amount * close_profit)), 0.0) AS realized_abs
+                    FROM trades
+                    WHERE is_open = 0
+                      AND close_date IS NOT NULL
+                      AND julianday(close_date) >= julianday(?)
+                    """,
+                    (day_start.isoformat(),),
+                ).fetchone()
+                or {}
+            )
+            cur.close()
+            conn.close()
+        stats["realized_abs"] = float(row.get("realized_abs") or 0.0)
+        stats["closed_trades_today"] = int(row.get("closed_trades") or 0)
+    except Exception as exc:
+        stats["db_error"] = f"db_error:{str(exc)[:120]}"
+    return stats
+
+
+def _load_bot_performance_snapshot(hours: int) -> dict[str, object]:
+    target = _freqtrade_db_target()
+    stats: dict[str, object] = {
+        "hours": hours,
+        "closed_trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_profit_pct": 0.0,
+        "net_profit_abs": 0.0,
+        "best_trade_abs": 0.0,
+        "worst_trade_abs": 0.0,
+        "best_pair": "",
+        "concentration_pct": 0.0,
+        "db_error": "",
+    }
+    if not target:
+        stats["db_error"] = "freqtrade_db_unset"
+        return stats
+
+    backend = _detect_backend(target)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    try:
+        if backend == "postgres":
+            import psycopg2
+            import psycopg2.extras
+
+            conn = psycopg2.connect(_normalize_postgres_target(target))
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) AS closed_trades,
+                    COALESCE(AVG(close_profit * 100.0), 0.0) AS avg_profit_pct,
+                    COALESCE(SUM(close_profit_abs), 0.0) AS net_profit_abs,
+                    COALESCE(100.0 * AVG(CASE WHEN close_profit > 0 THEN 1.0 ELSE 0.0 END), 0.0) AS win_rate_pct,
+                    COALESCE(MAX(close_profit_abs), 0.0) AS best_trade_abs,
+                    COALESCE(MIN(close_profit_abs), 0.0) AS worst_trade_abs
+                FROM trades
+                WHERE is_open = false
+                  AND close_date IS NOT NULL
+                  AND close_date >= %s
+                """,
+                (cutoff,),
+            )
+            summary = dict(cur.fetchone() or {})
+            cur.execute(
+                """
+                SELECT pair, close_profit_abs
+                FROM trades
+                WHERE is_open = false
+                  AND close_date IS NOT NULL
+                  AND close_date >= %s
+                ORDER BY close_profit_abs DESC NULLS LAST
+                LIMIT 1
+                """,
+                (cutoff,),
+            )
+            best_row = dict(cur.fetchone() or {})
+            cur.close()
+            conn.close()
+        else:
+            import sqlite3
+
+            db_path = target
+            if db_path.startswith("sqlite:///"):
+                db_path = db_path[len("sqlite:///") :]
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            summary = dict(
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS closed_trades,
+                        COALESCE(AVG(close_profit * 100.0), 0.0) AS avg_profit_pct,
+                        COALESCE(SUM(close_profit_abs), 0.0) AS net_profit_abs,
+                        COALESCE(100.0 * AVG(CASE WHEN close_profit > 0 THEN 1.0 ELSE 0.0 END), 0.0) AS win_rate_pct,
+                        COALESCE(MAX(close_profit_abs), 0.0) AS best_trade_abs,
+                        COALESCE(MIN(close_profit_abs), 0.0) AS worst_trade_abs
+                    FROM trades
+                    WHERE is_open = 0
+                      AND close_date IS NOT NULL
+                      AND julianday(close_date) >= julianday(?)
+                    """,
+                    (cutoff.isoformat(),),
+                ).fetchone()
+                or {}
+            )
+            best_row = dict(
+                cur.execute(
+                    """
+                    SELECT pair, close_profit_abs
+                    FROM trades
+                    WHERE is_open = 0
+                      AND close_date IS NOT NULL
+                      AND julianday(close_date) >= julianday(?)
+                    ORDER BY close_profit_abs DESC
+                    LIMIT 1
+                    """,
+                    (cutoff.isoformat(),),
+                ).fetchone()
+                or {}
+            )
+            cur.close()
+            conn.close()
+        stats["closed_trades"] = int(summary.get("closed_trades") or 0)
+        stats["avg_profit_pct"] = float(summary.get("avg_profit_pct") or 0.0)
+        stats["net_profit_abs"] = float(summary.get("net_profit_abs") or 0.0)
+        stats["win_rate_pct"] = float(summary.get("win_rate_pct") or 0.0)
+        stats["best_trade_abs"] = float(summary.get("best_trade_abs") or 0.0)
+        stats["worst_trade_abs"] = float(summary.get("worst_trade_abs") or 0.0)
+        stats["best_pair"] = str(best_row.get("pair") or "")
+        if abs(stats["net_profit_abs"]) > 1e-9:
+            stats["concentration_pct"] = abs(stats["best_trade_abs"]) / abs(stats["net_profit_abs"]) * 100.0
+    except Exception as exc:
+        stats["db_error"] = f"db_error:{str(exc)[:120]}"
+    return stats
+
+
+async def _fetch_freqtrade_api_json(path: str) -> tuple[dict[str, object] | list[object] | None, str | None]:
+    base_url = _freqtrade_api_base_url()
+    auth = _freqtrade_api_auth()
+    url = f"{base_url}{path}"
+    timeout = aiohttp.ClientTimeout(total=5)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, auth=auth) as session:
+            async with session.get(url) as response:
+                if response.status >= 400:
+                    return None, f"http_{response.status}"
+                payload = await response.json()
+                return payload, None
+    except Exception as exc:
+        return None, str(exc)[:120]
+
+
+async def _daily_guard_snapshot() -> dict[str, object]:
+    now = time.time()
+    cached_ts = float(DAILY_GUARD_CACHE.get("ts") or 0.0)
+    cached_payload = DAILY_GUARD_CACHE.get("payload")
+    if isinstance(cached_payload, dict) and (now - cached_ts) < 15.0:
+        return dict(cached_payload)
+
+    trade_stats = _load_daily_realized_trade_stats()
+    balance_payload, balance_error = await _fetch_freqtrade_api_json("/api/v1/balance")
+    status_payload, status_error = await _fetch_freqtrade_api_json("/api/v1/status")
+
+    mode = _daily_pnl_base_mode()
+    target_pct = _daily_target_pct_value()
+    max_loss_pct = _daily_max_drawdown_pct_value()
+    fixed_capital = _daily_pnl_fixed_capital_value()
+    base_capital = fixed_capital
+    base_source = "fixed_capital"
+
+    balance_dict = balance_payload if isinstance(balance_payload, dict) else {}
+    if mode == "equity":
+        equity_capital = _daily_guard_capital_from_balance(balance_dict)
+        if equity_capital is not None and equity_capital > 0.0:
+            base_capital = equity_capital
+            base_source = "live_equity"
+        else:
+            base_source = "live_equity_unavailable"
+    elif mode == "config":
+        config_capital = _safe_float(os.getenv("DAILY_PNL_BASE_CAPITAL")) or fixed_capital
+        base_capital = config_capital
+        base_source = "configured_capital"
+
+    realized_abs = float(trade_stats.get("realized_abs") or 0.0)
+    realized_pct = (realized_abs / base_capital) * 100.0 if base_capital > 0 else 0.0
+    target_abs = base_capital * (target_pct / 100.0)
+    max_loss_abs = base_capital * (max_loss_pct / 100.0)
+    allow_entries = True
+    reason = "ok"
+    if realized_pct >= target_pct:
+        if _daily_target_switch_to_defensive_value():
+            allow_entries = True
+            reason = "daily_target_defensive"
+        else:
+            allow_entries = False
+            reason = "daily_target_reached"
+    elif realized_pct <= max_loss_pct:
+        allow_entries = False
+        reason = "daily_loss_limit"
+
+    open_trades = len(status_payload) if isinstance(status_payload, list) else None
+    total_bot = _safe_float(str(balance_dict.get("total_bot", "")))
+    total_balance = _safe_float(str(balance_dict.get("total", "")))
+    starting_capital = _safe_float(str(balance_dict.get("starting_capital", "")))
+
+    payload = {
+        "mode": mode,
+        "base_capital": base_capital,
+        "base_source": base_source,
+        "realized_abs": realized_abs,
+        "realized_pct": realized_pct,
+        "target_pct": target_pct,
+        "target_abs": target_abs,
+        "max_loss_pct": max_loss_pct,
+        "max_loss_abs": max_loss_abs,
+        "allow_entries": allow_entries,
+        "reason": reason,
+        "closed_trades_today": int(trade_stats.get("closed_trades_today") or 0),
+        "open_trades": open_trades,
+        "total_bot": total_bot,
+        "total_balance": total_balance,
+        "starting_capital": starting_capital,
+        "stake_total_balance_pct": _stake_total_balance_pct_value(),
+        "api_error": balance_error or status_error or "",
+        "db_error": str(trade_stats.get("db_error") or ""),
+    }
+    DAILY_GUARD_CACHE["ts"] = now
+    DAILY_GUARD_CACHE["payload"] = dict(payload)
+    return payload
 
 
 def _load_coin_news_rows(limit: int = 20) -> list[dict[str, object]]:
@@ -943,6 +1293,9 @@ async def dashboard(request: web.Request) -> web.Response:
     debug_fetch_limit = _parse_int(os.getenv("SPIKE_LLM_DEBUG_FETCH_LIMIT"), 500, 20, 5000)
     llm_debug_rows, llm_debug_error = await _fetch_llm_debug_rows(debug_fetch_limit)
     debug_total = len(llm_debug_rows)
+    daily_guard = await _daily_guard_snapshot()
+    bot_perf_24h = _load_bot_performance_snapshot(24)
+    bot_perf_7d = _load_bot_performance_snapshot(24 * 7)
 
     alerts_page = min(alerts_page_requested, _total_pages(alerts_total, page_size))
     outcomes_page = min(outcomes_page_requested, _total_pages(outcomes_total, page_size))
@@ -1239,6 +1592,80 @@ async def dashboard(request: web.Request) -> web.Response:
     llm_debug_error_html = (
         f'<div class="muted warn">LLM debug feed issue: {_esc(llm_debug_error)}</div>' if llm_debug_error else ""
     )
+    daily_guard_error = " | ".join(
+        [part for part in [str(daily_guard.get("api_error") or ""), str(daily_guard.get("db_error") or "")] if part]
+    )
+    daily_guard_error_html = (
+        f'<div class="muted warn">Daily guard data issue: {_esc(daily_guard_error)}</div>' if daily_guard_error else ""
+    )
+    daily_guard_cards_html = "".join(
+        [
+            (
+                f'<div class="metric-card"><div class="metric-label">Entries Allowed</div>'
+                f'<div class="metric-value">{_esc("yes" if bool(daily_guard.get("allow_entries")) else "no")}</div>'
+                f'<div class="metric-sub">{_esc(str(daily_guard.get("reason") or ""))}</div></div>'
+            ),
+            (
+                f'<div class="metric-card"><div class="metric-label">Daily Realized</div>'
+                f'<div class="metric-value">{_fmt_pct(daily_guard.get("realized_pct"))}</div>'
+                f'<div class="metric-sub">{_esc(_fmt_money(daily_guard.get("realized_abs")))}</div></div>'
+            ),
+            (
+                f'<div class="metric-card"><div class="metric-label">Daily Target</div>'
+                f'<div class="metric-value">{_fmt_pct(daily_guard.get("target_pct"))}</div>'
+                f'<div class="metric-sub">{_esc(_fmt_money(daily_guard.get("target_abs")))}</div></div>'
+            ),
+            (
+                f'<div class="metric-card"><div class="metric-label">Daily Max Loss</div>'
+                f'<div class="metric-value">{_fmt_pct(daily_guard.get("max_loss_pct"))}</div>'
+                f'<div class="metric-sub">{_esc(_fmt_money(daily_guard.get("max_loss_abs")))}</div></div>'
+            ),
+            (
+                f'<div class="metric-card"><div class="metric-label">PnL Basis</div>'
+                f'<div class="metric-value">{_esc(str(daily_guard.get("mode") or ""))}</div>'
+                f'<div class="metric-sub">{_esc(_fmt_money(daily_guard.get("base_capital")))} via {_esc(str(daily_guard.get("base_source") or ""))}</div></div>'
+            ),
+            (
+                f'<div class="metric-card"><div class="metric-label">Live Equity</div>'
+                f'<div class="metric-value">{_esc(_fmt_money(daily_guard.get("total_bot") or daily_guard.get("total_balance")))}</div>'
+                f'<div class="metric-sub">open={_esc(str(daily_guard.get("open_trades") if daily_guard.get("open_trades") is not None else "n/a"))} '
+                f'closed_today={_esc(str(daily_guard.get("closed_trades_today") or 0))}</div></div>'
+            ),
+            (
+                f'<div class="metric-card"><div class="metric-label">Stake Sizing</div>'
+                f'<div class="metric-value">{_fmt_num(daily_guard.get("stake_total_balance_pct"), 2)}%</div>'
+                f'<div class="metric-sub">of total stake capital per new trade</div></div>'
+            ),
+        ]
+    )
+    bot_perf_error = " | ".join(
+        [part for part in [str(bot_perf_24h.get("db_error") or ""), str(bot_perf_7d.get("db_error") or "")] if part]
+    )
+    bot_perf_error_html = (
+        f'<div class="muted warn">Bot performance data issue: {_esc(bot_perf_error)}</div>' if bot_perf_error else ""
+    )
+    bot_perf_cards_html = "".join(
+        [
+            (
+                f'<div class="metric-card"><div class="metric-label">Bot 24h</div>'
+                f'<div class="metric-value">{_esc(_fmt_money(bot_perf_24h.get("net_profit_abs")))}</div>'
+                f'<div class="metric-sub">closed={int(bot_perf_24h.get("closed_trades") or 0)} '
+                f'win={_fmt_pct(bot_perf_24h.get("win_rate_pct"))} avg={_fmt_pct(bot_perf_24h.get("avg_profit_pct"))}</div></div>'
+            ),
+            (
+                f'<div class="metric-card"><div class="metric-label">Bot 7d</div>'
+                f'<div class="metric-value">{_esc(_fmt_money(bot_perf_7d.get("net_profit_abs")))}</div>'
+                f'<div class="metric-sub">closed={int(bot_perf_7d.get("closed_trades") or 0)} '
+                f'win={_fmt_pct(bot_perf_7d.get("win_rate_pct"))} avg={_fmt_pct(bot_perf_7d.get("avg_profit_pct"))}</div></div>'
+            ),
+            (
+                f'<div class="metric-card"><div class="metric-label">PnL Concentration 7d</div>'
+                f'<div class="metric-value">{_fmt_pct(bot_perf_7d.get("concentration_pct"))}</div>'
+                f'<div class="metric-sub">best={_esc(str(bot_perf_7d.get("best_pair") or "n/a"))} '
+                f'{_esc(_fmt_money(bot_perf_7d.get("best_trade_abs")))} / worst {_esc(_fmt_money(bot_perf_7d.get("worst_trade_abs")))}</div></div>'
+            ),
+        ]
+    )
 
     html = f"""
 <!doctype html>
@@ -1261,6 +1688,11 @@ async def dashboard(request: web.Request) -> web.Response:
     h1 {{ margin: 0 0 12px; }}
     h2 {{ margin-top: 28px; margin-bottom: 6px; }}
     .toolbar, .section {{ background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px; box-shadow: 0 1px 2px rgba(9, 30, 66, 0.06); }}
+    .metrics {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }}
+    .metric-card {{ border: 1px solid #dde6ef; border-radius: 10px; padding: 12px; background: linear-gradient(180deg, #fbfdff, #f5f9fd); }}
+    .metric-label {{ font-size: 12px; color: var(--muted); margin-bottom: 6px; }}
+    .metric-value {{ font-size: 24px; font-weight: 700; line-height: 1.1; }}
+    .metric-sub {{ font-size: 12px; color: var(--muted); margin-top: 6px; white-space: normal; }}
     .toolbar {{ display: flex; flex-direction: column; gap: 12px; }}
     .toolbar-top {{ display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }}
     .toolbar-forms {{ display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }}
@@ -1413,6 +1845,18 @@ async def dashboard(request: web.Request) -> web.Response:
   </div>
 
   <section id="tab-overview" class="tab-panel active">
+    <h2>Live Daily Guard</h2>
+    <div class="section">
+      <div class="metrics">{daily_guard_cards_html}</div>
+      {daily_guard_error_html}
+    </div>
+
+    <h2>Bot Performance</h2>
+    <div class="section">
+      <div class="metrics">{bot_perf_cards_html}</div>
+      {bot_perf_error_html}
+    </div>
+
     <h2>Summary By Horizon</h2>
     <div class="section">
       <div class="wrap">
@@ -1830,6 +2274,10 @@ async def api_llm_debug(request: web.Request) -> web.Response:
     )
 
 
+async def api_daily_guard(_: web.Request) -> web.Response:
+    return web.json_response(await _daily_guard_snapshot())
+
+
 async def healthz(_: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
@@ -1845,4 +2293,5 @@ def create_app(store: PredictionStore) -> web.Application:
     app.router.add_get("/api/llm-evals", api_llm_evals)
     app.router.add_get("/api/entry-diags", api_entry_diags)
     app.router.add_get("/api/llm-debug", api_llm_debug)
+    app.router.add_get("/api/daily-guard", api_daily_guard)
     return app

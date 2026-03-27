@@ -341,6 +341,11 @@ Core strategy:
 - `BENCHMARK_PAIR=BTC/USDT` and `BENCHMARK_FILTER_FOR_RISK=true|false`
 - `ENTRY_RANKING_ENABLED=true|false`, `ENTRY_TOP_N=1`, `ENTRY_MIN_SCORE=0.58`
 - `RISK_STAKE_MULTIPLIER=...` and `RISK_MAX_OPEN_TRADES=...`
+- `DAILY_PNL_BASE_MODE=config|equity|fixed`
+- `DAILY_PNL_BASE_CAPITAL=...` only used when `DAILY_PNL_BASE_MODE=fixed`
+- `DAILY_TARGET_SWITCH_TO_DEFENSIVE=true|false` keeps entries on after target hit, but forces a smaller / stricter posture
+- `DAILY_TARGET_DEFENSIVE_STAKE_MULTIPLIER=...` and `DAILY_TARGET_DEFENSIVE_MAX_OPEN_TRADES=...`
+- `STAKE_TOTAL_BALANCE_PCT=...` to size each new position as a percent of total stake capital
 - `IGNORE_BUYING_EXPIRED_CANDLE_AFTER=1200` for 15m aggressive mode
 - `RUNTIME_POLICY_ENABLED=true|false` (read runtime policy JSON and adapt risk knobs on the fly)
 - `RUNTIME_POLICY_PATH=/freqtrade/user_data/logs/llm-runtime-policy.json`
